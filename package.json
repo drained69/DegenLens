@@ -1,0 +1,23 @@
+{
+  "name": "degenlens",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Verifiable on-chain gambling intelligence powered by Telegraph Protocol",
+  "packageManager": "pnpm@9.0.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "miner:dev": "cd packages/miner && uvicorn app.main:app --reload --port 8787",
+    "scorer:build": "cd packages/scorer && cargo build --release --target wasm32-unknown-unknown",
+    "scorer:test": "cd packages/scorer && cargo test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

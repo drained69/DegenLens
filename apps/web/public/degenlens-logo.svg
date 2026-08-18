@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 32" role="img" aria-labelledby="title">
+  <title id="title">DegenLens</title>
+  <g fill="#F7FAFC">
+    <path d="M0 0h6v32H0z"/>
+    <path d="M6 0h13v6H6z"/>
+    <path d="M6 26h13v6H6z"/>
+    <path d="M19 0l6 6v20l-6 6V0z"/>
+    <path d="M30 0h6v26h12v6H30V0z"/>
+  </g>
+  <rect x="8" y="14" width="9" height="4" fill="#4ADE80"/>
+</svg>

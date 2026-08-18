@@ -5,8 +5,20 @@
 node_modules/
 dist/
 .next/
+*.tsbuildinfo
 target/
 *.log
 .scratchpad/
 
-Ideas.md
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Rust
+Cargo.lock
+
+# pnpm
+.pnpm-store/

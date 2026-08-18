@@ -1,0 +1,434 @@
+version: "1"
+kind: miner
+id: 0                       # assigned at registration
+slug: degenlens-onchain
+protocol: generic
+name: DegenLens On-Chain Gambling Intelligence
+description: >
+  Evidence-backed intelligence for observable on-chain gambling activity.
+  DegenMiner looks up transactions, measures directional flow around attributed
+  operator wallets, maps wallet relationships, and surfaces explainable anomaly
+  signals. Every
+  answer includes a verdict, confidence, reasoning, and data provenance so
+  consumers can distinguish observed chain state from degraded output.
+
+# base_url is the PRODUCTION API ENDPOINT Telegraph routes requests to —
+# not the project website. The website/docs links live under `docs` below.
+base_url: https://degenminer-production.up.railway.app
+
+docs:
+  repository: https://github.com/drained69/DegenLens
+
+# The API is publicly accessible and requires no credentials. Declaring
+# `type: none` explicitly tells the node not to inject auth headers or query
+# parameters when forwarding requests.
+auth:
+  type: none
+
+# ── Operational envelope ─────────────────────────────────────────────────────
+# Declared honestly: the node enforces these, and overpromising causes timeouts
+# that count as failed answers.
+rate_limit_per_sec: 8
+cache_ttl_sec: 60
+circuit_threshold: 5
+circuit_cooldown_seconds: 30
+
+limitations:
+  - code: MAX_PARAM_VALUE
+    message: "Lookback window is capped at 720 hours (30 days)."
+    param: hours
+    property: value
+    value_num: 720
+    operator: lte
+  - code: MAX_PARAM_SIZE
+    message: "Address must be a 0x-prefixed 42-character hex string."
+    param: address
+    property: length
+    value_num: 42
+    operator: lte
+
+input_schema:
+  type: object
+  description: >
+    Request shape varies by endpoint. /transaction/lookup takes {tx_hash, chain};
+    /casino/stats takes {slug, hours};
+    /wallet/trace takes {address, chain}; /anomaly/check takes
+    {address, chain, hours}; /casino/ranking takes ?hours= as a query param.
+  properties:
+    slug:
+      type: string
+      description: "Casino identifier, e.g. 'stake' or 'shuffle'. See GET /casinos."
+      examples: ["stake", "shuffle"]
+    address:
+      type: string
+      pattern: "^0x[a-fA-F0-9]{40}$"
+      description: "EVM wallet address to trace or screen."
+      examples: ["0x974caa59e49682cda0ad2bbe82983419a2ecc400"]
+    chain:
+      type: string
+      enum: [ethereum, base, polygon, arbitrum]
+      default: ethereum
+    hours:
+      type: integer
+      minimum: 1
+      maximum: 720
+      default: 24
+      description: "Lookback window in hours."
+    tx_hash:
+      type: string
+      pattern: "^0x[a-fA-F0-9]{64}$"
+      description: "Canonical EVM transaction hash."
+
+output_schema:
+  type: object
+  required: [confidence, verdict, reasoning, data_source]
+  properties:
+    confidence:
+      type: number
+      minimum: 0
+      maximum: 1
+      description: "Answer confidence. 0 when data is unavailable."
+    verdict:
+      type: string
+      description: >
+        Short label. net_inflow|net_outflow for operator flow; normal|suspicious|critical
+        for fraud screening; the casino slug or 'unlabeled' for wallet traces.
+    reasoning:
+      type: string
+      description: "Human-readable explanation of how the verdict was reached."
+    data_source:
+      type: string
+      enum: [live, demo, unavailable, registry, derived]
+      description: "Provenance of the figures in this response."
+    deposits_usd:
+      type: number
+      description: "USD value of inbound transfers observed in the window."
+    withdrawals_usd:
+      type: number
+      description: "USD value of outbound transfers observed in the window."
+    net_flow_usd:
+      type: number
+    unique_depositors:
+      type: integer
+    transaction_count:
+      type: integer
+    balance_native:
+      type: number
+      description: "Native token balance for a traced address."
+    associations:
+      type: array
+      description: "Casino clusters an address has interacted with in 30 days."
+      items:
+        type: object
+        properties:
+          casino_slug: { type: string }
+          casino_name: { type: string }
+          interactions_30d: { type: integer }
+          cluster_confidence: { type: number }
+    score:
+      type: number
+      minimum: 0
+      maximum: 1
+      description: "Anomaly prioritization score. Higher means more evidence requires review."
+    is_suspicious:
+      type: boolean
+    signals:
+      type: array
+      items: { type: string }
+      description: "Named fraud patterns matched, with evidence."
+
+endpoints:
+  - path: /transaction/lookup
+    external_path: /transaction/lookup
+    method: POST
+    description: >
+      Canonical transaction lookup by chain and transaction hash. Returns status,
+      block, sender, recipient, native value, gas fields, and separate gambling
+      entity attribution claims with confidence and evidence status.
+      REQUEST: {"tx_hash": "0x...", "chain": "ethereum"}
+
+  - path: /casino/stats
+    external_path: /casino/stats
+    method: POST
+    description: >
+      Observed inbound and outbound transfer volume, unique inbound counterparty
+      count, and net flow around an attributed operator wallet set.
+      REQUEST: {"slug": "stake", "hours": 24}
+      RESPONSE: {"slug": "stake", "deposits_usd": 2672237.51,
+      "withdrawals_usd": 772038.14, "net_flow_usd": 1900199.37,
+      "unique_depositors": 308, "transaction_count": 408, "confidence": 0.93,
+      "verdict": "net_inflow", "reasoning": "...", "data_source": "live"}
+
+  - path: /casino/ranking
+    external_path: /casino/ranking
+    method: GET
+    description: >
+      Tracked operators ranked by observed inbound USD flow, with tracked-flow
+      share and unique inbound counterparty counts.
+      REQUEST: query param ?hours=168
+      RESPONSE: {"window_hours": 168, "count": 2, "ranking": [{"rank": 1,
+      "slug": "stake", "deposits_usd": 24567436.62, "market_share_pct": 66.53,
+      "unique_depositors": 3077}], "confidence": 0.9, "verdict": "leader:stake",
+      "reasoning": "...", "data_source": "live"}
+
+  - path: /wallet/trace
+    external_path: /wallet/trace
+    method: POST
+    description: >
+      Native balance plus casino cluster attribution for an address — which
+      operators it has interacted with over 30 days and at what confidence.
+      REQUEST: {"address": "0x974caa...c400", "chain": "ethereum"}
+      RESPONSE: {"address": "0x974caa...c400", "chain": "ethereum",
+      "balance_native": 5270.82, "labeled_casino": "stake",
+      "associations": [{"casino_slug": "stake", "interactions_30d": 6482,
+      "cluster_confidence": 0.95}], "confidence": 0.98, "verdict": "stake",
+      "reasoning": "...", "data_source": "live"}
+
+  - path: /anomaly/check
+    external_path: /anomaly/check
+    method: POST
+    description: >
+      Screen an address for wash-trading round-trips, transaction velocity
+      spikes above 3 sigma, and sybil deposit patterns. Returns a 0..1 score
+      with named evidence per matched signal.
+      REQUEST: {"address": "0x974caa...c400", "chain": "ethereum", "hours": 24}
+      RESPONSE: {"address": "0x974caa...c400", "verdict": "suspicious",
+      "score": 0.45, "is_suspicious": true, "signals": ["wash-trade round-trip
+      0x1a2b...↔0x3c4d..."], "transfers_analyzed": 234, "confidence": 0.78,
+      "reasoning": "...", "data_source": "live"}
+
+  - path: /casinos
+    external_path: /casinos
+    method: GET
+    description: >
+      Catalog of tracked casinos and their wallet cluster coverage.
+      REQUEST: no parameters
+      RESPONSE: {"count": 2, "casinos": [{"slug": "stake", "name": "Stake.com",
+      "licensed_in": "Curaçao", "wallet_count": 2, "chains": ["ethereum"]}]}
+
+  - path: /market/networks
+    external_path: /market/networks
+    method: GET
+    description: >
+      Observed flow split by chain across attributed operator clusters.
+      REQUEST: query param ?hours=168
+      RESPONSE: {"window_hours": 168, "chains": [{"chain": "ethereum",
+      "inbound_usd": 3391190.0, "outbound_usd": 1582479.0,
+      "share_of_observed_inbound_pct": 100.0, "transfers": 1606}],
+      "confidence": 0.55, "verdict": "lead_chain:ethereum", "reasoning": "...",
+      "data_source": "live"}
+
+  - path: /market/assets
+    external_path: /market/assets
+    method: GET
+    description: >
+      Asset composition of observed flow. Optional ?slug= scopes it to one
+      operator. Reports stablecoin share, a genuine behavioural signal.
+      REQUEST: query params ?hours=168&slug=stake
+      RESPONSE: {"assets": [{"symbol": "USDC", "inbound_usd": 2028000.0,
+      "share_of_observed_inbound_pct": 59.9, "is_stablecoin": true}],
+      "stablecoin_share_pct": 82.0, "confidence": 0.55, "verdict":
+      "top_asset:USDC", "reasoning": "...", "data_source": "live"}
+
+  - path: /market/large-transfers
+    external_path: /market/large-transfers
+    method: GET
+    description: >
+      Individual transfers above a USD threshold touching an attributed
+      cluster. Each row is one verifiable transaction hash.
+      REQUEST: query params ?hours=24&min_usd=100000&limit=50
+      RESPONSE: {"count": 6, "transfers": [{"tx_hash": "0xb93d31...",
+      "chain": "ethereum", "operator_slug": "rollbit", "direction": "inbound",
+      "token": "USDC", "usd_value": 600001.0, "timestamp": "..."}],
+      "confidence": 0.55, "verdict": "6_transfers_above_threshold",
+      "reasoning": "...", "data_source": "live"}
+
+  - path: /operator/{slug}/series
+    external_path: /operator/{slug}/series
+    method: GET
+    description: >
+      Bucketed inbound/outbound flow series for one operator. Unattributed
+      operators return verdict "not_attributed" with confidence 0 — explicitly
+      unobserved rather than zero.
+      REQUEST: path slug, query params ?hours=168&bucket_hours=4
+      RESPONSE: {"slug": "stake", "points": 42, "series": [{"t": "...",
+      "inbound_usd": 722098.0, "outbound_usd": 19.0, "transfers": 435}],
+      "confidence": 0.55, "verdict": "42_buckets", "reasoning": "...",
+      "data_source": "live"}
+
+  - path: /operator/{slug}/counterparties
+    external_path: /operator/{slug}/counterparties
+    method: GET
+    description: >
+      Counterparty concentration for an operator. High top-10 share indicates
+      routing or bridge activity rather than broad user behaviour.
+      REQUEST: path slug, query params ?hours=168&top=20
+      RESPONSE: {"slug": "stake", "distinct_counterparties": 719,
+      "top10_share_of_observed_flow_pct": 77.03, "counterparties":
+      [{"address": "0x6f53...", "total_usd": 425999.0,
+      "share_of_observed_flow_pct": 30.52}], "confidence": 0.55,
+      "reasoning": "...", "data_source": "live"}
+
+  - path: /coverage
+    external_path: /coverage
+    method: GET
+    description: >
+      What the miner can and cannot see. Distinguishes attributed operators
+      (produce figures) from catalogued-but-unobserved ones (produce nothing,
+      never a zero). Consumers should weight all other figures through this.
+      REQUEST: no parameters
+      RESPONSE: {"operators_catalogued": 22, "operators_attributed": 5,
+      "operators_unattributed": 17, "wallet_clusters": 6, "chains_covered":
+      ["ethereum"], "caveat": "...", "confidence": 1.0, "data_source": "registry"}
+
+  - path: /player/evaluate
+    external_path: /player/evaluate
+    method: POST
+    description: >
+      Evaluate one address against every attributed operator cluster. Returns
+      value sent to and received from operators, net position, per-operator
+      exposure, and a behavioural classification (individual_candidate,
+      one_directional, infrastructure, operator_wallet, low_activity).
+      Net position is settlement direction, NOT gambling profit and loss —
+      balances held inside an operator are invisible and non-wager flows such as
+      affiliate payouts are indistinguishable from winnings.
+      REQUEST: {"address": "0x...", "chain": "ethereum", "hours": 720}
+      RESPONSE: {"address": "0x...", "sent_to_operators_usd": 316881.0,
+      "received_from_operators_usd": 316879.0, "net_position_usd": -2.0,
+      "transfers_with_operators": 3, "operators_touched": 1, "exposures": [...],
+      "entity_class": "individual_candidate", "behaviour_flags": [...],
+      "confidence": 0.5, "verdict": "net_negative", "reasoning": "...",
+      "data_source": "live"}
+
+  - path: /players/leaderboard
+    external_path: /players/leaderboard
+    method: GET
+    description: >
+      Counterparties ranked by net observed position across attributed operator
+      clusters, derived from settlement rather than scraped bet feeds. Only
+      addresses showing bidirectional flow are ranked; one-directional and
+      infrastructure addresses are classified out and reported separately.
+      REQUEST: query params ?hours=168&limit=25&include_infrastructure=false
+      RESPONSE: {"addresses_observed": 4717, "class_counts": {...},
+      "individual_candidates": 3, "one_directional_excluded": 1147,
+      "infrastructure_excluded": 10, "net_positive": [...], "net_negative": [...],
+      "largest_one_directional": [...], "methodology": "...", "confidence": 0.55,
+      "data_source": "live"}
+
+  - path: /attribution/discover/{slug}
+    external_path: /attribution/discover/{slug}
+    method: GET
+    description: >
+      Propose candidate sibling wallets for an already-attributed operator,
+      ranked by on-chain evidence (bidirectional cluster flow, counterparty
+      overlap, hub shape, transfer cadence). Returns a REVIEW QUEUE — behaviour
+      consistent with an operator wallet never proves ownership, and nothing is
+      added to the registry automatically.
+      REQUEST: path slug, query params ?hours=720&limit=10
+      RESPONSE: {"slug": "stake", "counterparties_examined": 3326,
+      "candidates": [{"address": "0x...", "strength": 0.45,
+      "recommended_status": "unverified_seed", "review_required": true,
+      "evidence": {...}, "signals": [...]}], "confidence": 0.6,
+      "verdict": "6_candidates_0_strong", "reasoning": "...",
+      "data_source": "derived"}
+
+  - path: /attribution/discover
+    external_path: /attribution/discover
+    method: GET
+    description: >
+      Run candidate discovery across every attributed operator at once.
+      REQUEST: query params ?hours=720&per_operator=5
+      RESPONSE: {"operators_expanded": 5, "candidates_proposed": 24,
+      "strong_candidates": 0, "by_operator": [...], "confidence": 0.6,
+      "reasoning": "...", "data_source": "derived"}
+
+  - path: /operator/{slug}/treasury
+    external_path: /operator/{slug}/treasury
+    method: GET
+    description: >
+      Current on-chain holdings across an operator's attributed clusters —
+      native balance plus ERC20 token balances, priced to USD with an asset
+      breakdown. Balances, not flow. NOT a solvency statement: player
+      liabilities are off-chain and unattributed wallets are invisible.
+      REQUEST: path slug
+      RESPONSE: {"slug": "stake", "total_usd": 8693715.0,
+      "stablecoin_share_pct": 0.0, "distinct_assets": 1,
+      "holdings": [{"symbol": "ETH", "amount": 4577.66, "usd_value": 8693669.0,
+      "share_pct": 100.0}], "wallets": [...], "confidence": 0.55,
+      "verdict": "reserves:8693715", "reasoning": "...", "data_source": "live"}
+
+  - path: /market/treasury
+    external_path: /market/treasury
+    method: GET
+    description: >
+      All attributed operators ranked by observed on-chain reserves, with
+      stablecoin share and share of observed reserves.
+      REQUEST: no parameters
+      RESPONSE: {"operators": [{"rank": 1, "slug": "stake",
+      "total_usd": 8693715.0, "share_of_observed_reserves_pct": 99.79}],
+      "total_observed_usd": 8711612.0, "operators_read": 5, "confidence": 0.55,
+      "verdict": "leader:stake", "reasoning": "...", "data_source": "live"}
+
+  - path: /market/providers
+    external_path: /market/providers
+    method: GET
+    description: >
+      Infrastructure providers ranked by casino flow carried, with rising and
+      falling trend versus the prior equal window. These are the bridges,
+      exchange hot wallets, and routing contracts that move value in and out of
+      operator wallets. NOT game providers — a wager settles inside an
+      operator's ledger and leaves no on-chain record attributing it to a game
+      studio, so game-provider ranking is not derivable from chain data.
+      REQUEST: query params ?hours=168&limit=25
+      RESPONSE: {"ranked": [{"address": "0x...", "label": "Binance 14",
+      "category": "exchange", "flow_usd": 22816040.0, "trend": "falling",
+      "change_pct": -18.2, "operators_served": 1,
+      "share_of_rail_flow_pct": 59.99}], "trending": [...], "categories": [...],
+      "confidence": 0.55, "verdict": "top_rail:Binance 14", "data_source": "live"}
+
+  - path: /players/cohorts
+    external_path: /players/cohorts
+    method: GET
+    description: >
+      Value segments, new-versus-returning retention, and flow concentration
+      across every observed counterparty. Broader than the net-position board:
+      it covers all addresses, not only those with a round trip.
+      REQUEST: query param ?hours=168
+      RESPONSE: {"addresses_active": 4426, "new_this_period": 2535,
+      "returning": 1891, "retention_pct": 42.72, "segments": [{"segment": "mega",
+      "addresses": 7, "share_of_gross_pct": 76.0}], "concentration":
+      {"top_10_share_pct": 79.2}, "confidence": 0.55, "data_source": "live"}
+
+  - path: /players/overlap
+    external_path: /players/overlap
+    method: GET
+    description: >
+      Addresses transacting with more than one attributed operator — a shared
+      audience signal. Overlap is a floor, not a customer count: one person may
+      use several addresses.
+      REQUEST: query param ?hours=168
+      RESPONSE: {"addresses_observed": 4426, "multi_operator_addresses": 12,
+      "overlap_pct": 0.27, "operator_pairs": [{"operator_a": "stake",
+      "operator_b": "rollbit", "shared_addresses": 8, "jaccard_pct": 0.19}],
+      "confidence": 0.55, "data_source": "live"}
+
+semantics:
+  signal_mapping:
+    confidence_field: confidence
+    label_field: verdict
+    reason_field: reasoning
+  supported_intents:
+    - ONCHAIN_TX_LOOKUP
+    - WALLET_BALANCE_CHECK
+    - FRAUD_DETECTION
+
+# NOTE: no `on_chain` block.
+#
+# DegenMiner serves pure inference over HTTP — it does not publish results into
+# ERC-8183 jobs or on-chain callbacks, so the on_chain mapping is not required.
+# The floor price is set in the on-chain registration transaction instead.
+#
+# Including a partial on_chain block would be invalid (`on_chain.transform` is
+# mandatory once the block exists), and a full one adds ERC-8183 request-mapping
+# surface that would have to be kept correct for no current benefit. Add it only
+# if this miner later needs to be callable from a smart contract.

@@ -1,0 +1,16 @@
+[package]
+name = "degenlens-scorer"
+version = "0.1.0"
+edition = "2021"
+description = "WASM scoring module for on-chain gambling intelligence miners"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+lto = true
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+strip = true

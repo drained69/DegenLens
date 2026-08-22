@@ -147,6 +147,23 @@ def test_yeet_gamstat_cluster_preserves_all_seven_networks():
     assert all(wallet.source == "https://gamstat.io/casinos/yeet" for wallet in targets)
 
 
+def test_only_five_operators_are_attributed_and_all_published_chains_are_kept():
+    attributed = {casino.slug for casino in CASINOS.values() if casino.is_attributed}
+    assert attributed == {"stake", "rollbit", "bcgame", "shuffle", "yeet"}
+    assert {wallet.chain for wallet in CASINOS["rollbit"].wallets} == {
+        "ethereum", "polygon", "solana", "bitcoin"
+    }
+    assert {wallet.chain for wallet in CASINOS["bcgame"].wallets} == {
+        "ethereum", "base", "polygon", "arbitrum", "bsc", "solana", "bitcoin", "tron"
+    }
+    assert {wallet.chain for wallet in CASINOS["shuffle"].wallets} == {
+        "ethereum", "base", "polygon", "arbitrum", "bsc", "solana", "tron"
+    }
+    assert {wallet.chain for wallet in CASINOS["yeet"].wallets} == {
+        "ethereum", "base", "polygon", "arbitrum", "bsc", "solana", "tron"
+    }
+
+
 # ── Endpoint contract ────────────────────────────────────────────────────────
 
 

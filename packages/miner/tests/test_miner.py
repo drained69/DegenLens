@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.analytics import anomaly_check, casino_stats, rank_casinos, wallet_trace
 from app.main import app
-from app.onchain import merge_cluster_reads, stable_seed
+from app.onchain import _fetch_bitcoin, _fetch_solana, _fetch_tron, merge_cluster_reads, stable_seed
 from app.settings import MINER_ROOT, PROJECT_ROOT, Settings
 from app.wallets import INDEXED_CHAINS, get_casino, observation_targets
 
@@ -47,6 +47,15 @@ def test_stable_seed_matches_known_value():
     assert stable_seed("0xabc", "ethereum") == stable_seed("0xabc", "ethereum")
     # Same inputs, different order must differ.
     assert stable_seed("a", "b") != stable_seed("b", "a")
+
+
+def test_non_evm_adapters_are_first_class_live_chains():
+    from app.onchain import is_evm_chain
+
+    assert not is_evm_chain("solana")
+    assert not is_evm_chain("tron")
+    assert not is_evm_chain("bitcoin")
+    assert all(callable(adapter) for adapter in (_fetch_solana, _fetch_tron, _fetch_bitcoin))
 
 
 def test_repeated_queries_return_identical_scored_payload():
@@ -224,6 +233,91 @@ async def test_upstream_failure_marks_multichain_coverage_partial(monkeypatch):
     avalanche = next(row for row in stats.by_chain if row["chain"] == target_chain)
     assert avalanche["status"] == "unavailable"
     assert avalanche["coverage_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_operator_deadline_keeps_completed_reads(monkeypatch):
+    """A slow wallet does not erase completed operator observations."""
+    from app.analytics import _aggregate_casino
+    from app.onchain import Transfer, TransferSet
+    from datetime import datetime, timezone
+
+    casino = get_casino("stake")
+    assert casino is not None
+    completed = Transfer(
+        tx_hash="0x" + "12" * 32,
+        from_addr="0x" + "34" * 20,
+        to_addr=casino.wallets[0].address,
+        token_symbol="USDC",
+        amount=100.0,
+        timestamp=datetime.now(timezone.utc),
+        chain="ethereum",
+        direction="in",
+    )
+
+    async def fake_transfers(address: str, chain: str, hours: int, *, seed: bool = True):
+        if chain == "ethereum":
+            return TransferSet([completed], "live", complete=True)
+        await asyncio.sleep(10)
+        return TransferSet([], "live", complete=True)
+
+    monkeypatch.setattr("app.analytics.get_observation_transfers", fake_transfers)
+    async def fake_prices(symbols):
+        return {"USDC": 1.0}
+
+    monkeypatch.setattr("app.analytics.resolve_prices", fake_prices)
+    from app.settings import settings
+    monkeypatch.setattr(settings, "request_timeout_s", 0.1)
+
+    stats = await _aggregate_casino(casino, 24)
+    assert stats.deposits_usd == 100.0
+    assert stats.data_source == "live"
+    assert stats.coverage_complete is False
+
+
+@pytest.mark.asyncio
+async def test_chain_status_keeps_observed_data_when_one_wallet_read_fails(monkeypatch):
+    """A failed duplicate wallet read must not hide another live read on-chain."""
+    from app.analytics import _aggregate_casino
+    from app.onchain import Transfer, TransferSet
+    from datetime import datetime, timezone
+
+    casino = get_casino("stake")
+    assert casino is not None
+    live = Transfer(
+        tx_hash="0x" + "56" * 32,
+        from_addr="0x" + "78" * 20,
+        to_addr=casino.wallets[0].address,
+        token_symbol="USDC",
+        amount=25.0,
+        timestamp=datetime.now(timezone.utc),
+        chain="ethereum",
+        direction="in",
+    )
+    calls = 0
+
+    async def fake_transfers(address: str, chain: str, hours: int, *, seed: bool = True):
+        nonlocal calls
+        if chain == "ethereum":
+            calls += 1
+            return TransferSet(
+                [live] if calls == 1 else [],
+                "live" if calls == 1 else "unavailable",
+                complete=calls == 1,
+            )
+        return TransferSet([], "unavailable", complete=False)
+
+    async def fake_prices(symbols):
+        return {"USDC": 1.0}
+
+    monkeypatch.setattr("app.analytics.get_observation_transfers", fake_transfers)
+    monkeypatch.setattr("app.analytics.resolve_prices", fake_prices)
+    stats = await _aggregate_casino(casino, 24)
+    ethereum = next(row for row in stats.by_chain if row["chain"] == "ethereum")
+    assert ethereum["data_source"] == "live"
+    assert ethereum["status"] == "observed"
+    assert ethereum["inbound_usd"] == 25.0
+    assert ethereum["coverage_complete"] is False
 
 
 @pytest.mark.asyncio

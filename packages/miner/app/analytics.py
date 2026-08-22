@@ -87,36 +87,68 @@ async def _aggregate_casino(
     # operators that reuse the same hot wallet across networks.
     targets = observation_targets(casino)
     seed_pairs = {(w.address.lower(), w.chain) for w in casino.wallets}
-    sets: list[TransferSet] = await asyncio.gather(
-        *(
+    # Large clusters such as Stake can contain dozens of wallet/network pairs.
+    # Do not let one slow provider turn all completed reads into an unavailable
+    # response at the service deadline. Completed reads remain usable lower
+    # bounds; unfinished pairs are represented as unavailable coverage gaps.
+    read_tasks = [
+        asyncio.create_task(
             get_observation_transfers(
                 w.address,
                 w.chain,
                 hours,
                 seed=(w.address.lower(), w.chain) in seed_pairs,
             )
-            for w in targets
         )
-    ) if targets else []
+        for w in targets
+    ]
+    if read_tasks:
+        done, pending = await asyncio.wait(
+            read_tasks,
+            timeout=max(5.0, settings.request_timeout_s - 6.0),
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        sets = [
+            task.result()
+            if task in done and not task.cancelled() and task.exception() is None
+            else TransferSet(
+                [],
+                "unavailable",
+                "operator read deadline exceeded",
+                complete=False,
+            )
+            for task in read_tasks
+        ]
+    else:
+        sets = []
 
     # Resolve every distinct token symbol in ONE upstream call.
     symbols = {t.token_symbol for s in sets for t in s.transfers}
-    prices = await resolve_prices(symbols)
+    try:
+        prices = await asyncio.wait_for(
+            resolve_prices(symbols),
+            timeout=max(1.0, settings.request_timeout_s - 2.0),
+        )
+    except asyncio.TimeoutError:
+        prices = {}
 
     all_transfers: list[Transfer] = []
     casino_addresses = {w.address.lower() for w in casino.wallets}
     by_chain_acc: dict[str, dict[str, float]] = defaultdict(
         lambda: {"inbound_usd": 0.0, "outbound_usd": 0.0, "transfers": 0}
     )
-    chain_sources: dict[str, str] = {}
-    chain_complete: dict[str, bool] = {}
+    chain_sources: dict[str, list[str]] = defaultdict(list)
+    chain_complete: dict[str, list[bool]] = defaultdict(list)
 
     for wallet, tset in zip(targets, sets):
         addr = wallet.address.lower()
         # Keep chain-level provenance separate from aggregate provenance. A
         # failed optional network must not be represented as observed zero.
-        chain_sources[wallet.chain] = tset.data_source
-        chain_complete[wallet.chain] = tset.complete
+        chain_sources[wallet.chain].append(tset.data_source)
+        chain_complete[wallet.chain].append(tset.complete)
         all_transfers.extend(tset.transfers)
         for t in tset.transfers:
             price = prices.get(t.token_symbol, 0.0)
@@ -126,9 +158,9 @@ async def _aggregate_casino(
             bucket = by_chain_acc[t.chain]
             # Chain-level observed totals remain directional facts. The flow
             # aggregate below applies cluster classification and deduplication.
-            if t.to_addr == addr:
+            if t.to_addr.lower() == addr:
                 bucket["inbound_usd"] += usd
-            elif t.from_addr == addr:
+            elif t.from_addr.lower() == addr:
                 bucket["outbound_usd"] += usd
             bucket["transfers"] += 1
 
@@ -172,14 +204,23 @@ async def _aggregate_casino(
                 "share_of_observed_inbound_pct": round(
                     b["inbound_usd"] / total_in * 100, 2
                 ),
-                "data_source": chain_sources.get(chain, "unavailable"),
-                "coverage_complete": chain_complete.get(chain, False),
+                 "data_source": (
+                     "live"
+                     if "live" in chain_sources.get(chain, [])
+                     else "demo"
+                     if "demo" in chain_sources.get(chain, [])
+                     else "unavailable"
+                 ),
+                 "coverage_complete": bool(chain_complete.get(chain)) and all(
+                     chain_complete[chain]
+                 ),
                 "status": (
                     "not_registered"
                     if chain not in casino.queried_chains
                     else
                     "unavailable"
-                    if chain_sources.get(chain) == "unavailable"
+                     if not chain_sources.get(chain)
+                     or all(source == "unavailable" for source in chain_sources[chain])
                     else "observed"
                     if b["transfers"]
                     else "queried_zero"
@@ -265,11 +306,40 @@ async def rank_casinos(hours: int = 168) -> tuple[list[dict], str]:
             for casino in operators
             if (entry := _STATS_CACHE.get((casino.slug, hours))) and entry[1] > now
         }
-        missing = [casino for casino in operators if casino.slug not in cached]
+        # A prior partial read can be cached as live with transfers but no USD
+        # totals. Refresh that shape so a transient provider/price failure does
+        # not make an operator appear permanently inactive in rankings.
+        missing = [
+            casino
+            for casino in operators
+            if casino.slug not in cached
+            or (
+                cached[casino.slug].data_source == "live"
+                and cached[casino.slug].deposits_usd == 0
+                and cached[casino.slug].withdrawals_usd == 0
+            )
+        ]
+        for casino in missing:
+            cached.pop(casino.slug, None)
         refreshed = await asyncio.gather(*(
             casino_stats(casino.slug, hours) for casino in missing
         ))
         stats = [*cached.values(), *(row for row in refreshed if row is not None)]
+        # Concurrent multi-operator reads can briefly lose token prices or hit
+        # an upstream limit. Retry only zero-valued live rows after that burst;
+        # this keeps a transient provider miss from becoming a ranked zero.
+        recovered: list[CasinoStats] = []
+        for row in stats:
+            if (
+                row.data_source == "live"
+                and row.deposits_usd == 0
+                and row.withdrawals_usd == 0
+            ):
+                retry = await casino_stats(row.slug, hours)
+                recovered.append(retry or row)
+            else:
+                recovered.append(row)
+        stats = recovered
     else:
         stats = await asyncio.gather(*(
             _aggregate_casino(casino, hours, include_transaction_evidence=False)

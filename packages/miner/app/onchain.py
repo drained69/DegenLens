@@ -180,6 +180,225 @@ def is_evm_chain(chain: str) -> bool:
     return chain in _ALCHEMY_HOSTS
 
 
+async def _fetch_solana(address: str, since: datetime) -> TransferSet:
+    """Read native SOL movements through the public Solana JSON-RPC API."""
+    try:
+        async with _upstream_sem:
+            async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                response = await client.post(
+                    settings.solana_rpc_url,
+                    json={
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "getSignaturesForAddress",
+                        "params": [address, {"limit": settings.max_transfer_pages * 100}],
+                    },
+                )
+                response.raise_for_status()
+                signatures = response.json().get("result") or []
+                transfers: list[Transfer] = []
+                # Public Solana RPCs rate-limit transaction hydration. A small
+                # bounded sample is preferable to turning the whole chain into
+                # unavailable after hundreds of rejected requests.
+                max_signatures = min(settings.max_transfer_pages * 100, 25)
+                signatures = signatures[:max_signatures]
+                complete = len(signatures) < max_signatures
+
+                async def fetch_transaction(entry: dict) -> Transfer | None:
+                    try:
+                        if entry.get("err") or not entry.get("blockTime"):
+                            return None
+                        timestamp = datetime.fromtimestamp(entry["blockTime"], tz=timezone.utc)
+                        if timestamp < since:
+                            return None
+                        tx_response = await client.post(
+                            settings.solana_rpc_url,
+                            json={
+                                "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+                                "params": [entry["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+                            },
+                        )
+                        tx_response.raise_for_status()
+                        tx = tx_response.json().get("result") or {}
+                        message = tx.get("transaction", {}).get("message", {})
+                        keys = [
+                            item.get("pubkey") if isinstance(item, dict) else item
+                            for item in message.get("accountKeys", [])
+                        ]
+                        index = keys.index(address) if address in keys else -1
+                        balances = tx.get("meta", {})
+                        if index < 0 or index >= len(balances.get("preBalances", [])):
+                            return None
+                        delta = balances["postBalances"][index] - balances["preBalances"][index]
+                        if delta == 0:
+                            # Casino Solana flow is commonly SPL USDC/USDT. Use
+                            # owner-level token balance changes when native SOL
+                            # is unchanged.
+                            pre_tokens = {
+                                row.get("mint"): float(row.get("uiTokenAmount", {}).get("uiAmount") or 0)
+                                for row in balances.get("preTokenBalances", [])
+                                if row.get("owner") == address
+                            }
+                            post_tokens = {
+                                row.get("mint"): float(row.get("uiTokenAmount", {}).get("uiAmount") or 0)
+                                for row in balances.get("postTokenBalances", [])
+                                if row.get("owner") == address
+                            }
+                            token_deltas = {
+                                mint: post_tokens.get(mint, 0) - pre_tokens.get(mint, 0)
+                                for mint in pre_tokens.keys() | post_tokens.keys()
+                            }
+                            mint, token_delta = max(
+                                token_deltas.items(), key=lambda item: abs(item[1]), default=("", 0.0)
+                            )
+                            if token_delta == 0:
+                                return None
+                            symbols = {
+                                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
+                                "Es9vMFrzaCERmJfrF4H2FYDkN7P8Jd7o1i1V5X7tXh": "USDT",
+                            }
+                            return Transfer(
+                                tx_hash=entry["signature"],
+                                from_addr="solana:unknown" if token_delta > 0 else address,
+                                to_addr=address if token_delta > 0 else "solana:unknown",
+                                token_symbol=symbols.get(mint, "SPL"),
+                                amount=abs(token_delta), timestamp=timestamp, chain="solana",
+                                direction="in" if token_delta > 0 else "out",
+                            )
+                        return Transfer(
+                            tx_hash=entry["signature"],
+                            from_addr="solana:unknown" if delta > 0 else address,
+                            to_addr=address if delta > 0 else "solana:unknown",
+                            token_symbol="SOL", amount=abs(delta) / 1e9,
+                            timestamp=timestamp, chain="solana",
+                            direction="in" if delta > 0 else "out",
+                        )
+                    except Exception:
+                        return None
+
+                transfers = [
+                    transfer
+                    for transfer in await asyncio.gather(
+                        *(fetch_transaction(entry) for entry in signatures),
+                        return_exceptions=False,
+                    )
+                    if transfer is not None
+                ]
+                _record_upstream_result(ok=True, chain="solana")
+                return TransferSet(transfers, "live", complete=complete)
+    except Exception as exc:  # noqa: BLE001 - provider failure is structured
+        _record_upstream_result(ok=False, chain="solana")
+        return TransferSet([], "unavailable", f"upstream error: {type(exc).__name__}", complete=False)
+
+
+async def _fetch_bitcoin(address: str, since: datetime) -> TransferSet:
+    """Read native BTC movements through the public Esplora API."""
+    try:
+        async with _upstream_sem:
+            async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                response = await client.get(f"{settings.bitcoin_api_url}/address/{address}/txs")
+                response.raise_for_status()
+                rows = response.json()
+        transfers: list[Transfer] = []
+        for row in rows[: settings.max_transfer_pages * 100]:
+            status = row.get("status", {})
+            block_time = status.get("block_time")
+            if not block_time:
+                continue
+            timestamp = datetime.fromtimestamp(block_time, tz=timezone.utc)
+            if timestamp < since:
+                continue
+            received = sum(
+                output.get("value", 0) for output in row.get("vout", [])
+                if address in output.get("scriptpubkey_address", "")
+            )
+            input_total = sum(item.get("prevout", {}).get("value", 0) for item in row.get("vin", []))
+            delta = received - input_total if input_total else received
+            if delta == 0:
+                continue
+            transfers.append(Transfer(
+                tx_hash=row.get("txid", ""),
+                from_addr="bitcoin:unknown" if delta > 0 else address,
+                to_addr=address if delta > 0 else "bitcoin:unknown",
+                token_symbol="BTC", amount=abs(delta) / 1e8,
+                timestamp=timestamp, chain="bitcoin",
+                direction="in" if delta > 0 else "out",
+            ))
+        _record_upstream_result(ok=True, chain="bitcoin")
+        return TransferSet(transfers, "live", complete=len(rows) < settings.max_transfer_pages * 100)
+    except Exception as exc:  # noqa: BLE001
+        _record_upstream_result(ok=False, chain="bitcoin")
+        return TransferSet([], "unavailable", f"upstream error: {type(exc).__name__}", complete=False)
+
+
+async def _fetch_tron(address: str, since: datetime) -> TransferSet:
+    """Read TRX and TRC-20 movements through TronGrid's public REST API."""
+    try:
+        async with _upstream_sem:
+            async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                response = await client.get(
+                    f"{settings.tron_api_url}/v1/accounts/{address}/transactions",
+                    params={"limit": 100, "only_confirmed": "true", "min_timestamp": int(since.timestamp() * 1000)},
+                )
+                response.raise_for_status()
+                rows = response.json().get("data") or []
+                token_complete = True
+                try:
+                    token_response = await client.get(
+                        f"{settings.tron_api_url}/v1/accounts/{address}/transactions/trc20",
+                        params={"limit": 100, "only_confirmed": "true", "min_timestamp": int(since.timestamp() * 1000)},
+                    )
+                    token_response.raise_for_status()
+                    token_rows = token_response.json().get("data") or []
+                except Exception:
+                    # TronGrid commonly rate-limits the optional token feed. A
+                    # successful native read is still useful, but incomplete.
+                    token_rows = []
+                    token_complete = False
+        transfers: list[Transfer] = []
+        for row in rows:
+            contract = (row.get("raw_data", {}).get("contract") or [{}])[0]
+            value = contract.get("parameter", {}).get("value", {})
+            amount = value.get("amount", 0)
+            if not amount:
+                continue
+            sender = value.get("owner_address", "")
+            recipient = value.get("to_address", "")
+            if sender != address and recipient != address:
+                continue
+            timestamp = datetime.fromtimestamp(row.get("block_timestamp", 0) / 1000, tz=timezone.utc)
+            transfers.append(Transfer(
+                tx_hash=row.get("txID", ""), from_addr=sender, to_addr=recipient,
+                token_symbol="TRX", amount=amount / 1e6, timestamp=timestamp,
+                chain="tron", direction="in" if recipient == address else "out",
+            ))
+        for row in token_rows:
+            timestamp = datetime.fromtimestamp(row.get("block_timestamp", 0) / 1000, tz=timezone.utc)
+            sender = row.get("from", "")
+            recipient = row.get("to", "")
+            if timestamp < since or (sender != address and recipient != address):
+                continue
+            decimals = int(row.get("token_info", {}).get("decimals", 6))
+            transfers.append(Transfer(
+                tx_hash=row.get("transaction_id", ""),
+                from_addr=sender,
+                to_addr=recipient,
+                token_symbol=(row.get("token_info", {}).get("symbol") or "TRC20").upper(),
+                amount=float(row.get("value", 0)) / (10 ** decimals),
+                timestamp=timestamp,
+                chain="tron",
+                direction="in" if recipient == address else "out",
+            ))
+        _record_upstream_result(ok=True, chain="tron")
+        return TransferSet(
+            transfers,
+            "live",
+            complete=token_complete and len(rows) < 100 and len(token_rows) < 100,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _record_upstream_result(ok=False, chain="tron")
+        return TransferSet([], "unavailable", f"upstream error: {type(exc).__name__}", complete=False)
+
+
 def _alchemy_host(chain: str) -> str:
     if chain not in _ALCHEMY_HOSTS:
         raise ValueError(f"unsupported chain: {chain}")
@@ -272,11 +491,14 @@ async def _fetch_live(address: str, chain: str, since: datetime) -> TransferSet:
     Inbound-only was the withdrawals-always-zero bug; single-page was the
     identical-across-windows bug.
     """
+    if chain == "solana":
+        return await _fetch_solana(address, since)
+    if chain == "tron":
+        return await _fetch_tron(address, since)
+    if chain == "bitcoin":
+        return await _fetch_bitcoin(address, since)
     if not is_evm_chain(chain):
-        return TransferSet(
-            [], "unsupported_chain",
-            f"{chain} is a registry identity, not an Alchemy-readable EVM chain",
-        )
+        return TransferSet([], "unavailable", f"no configured provider for chain: {chain}", complete=False)
     url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
     try:
         # A burst of seven chains x two directions can trigger provider 429s.
@@ -415,14 +637,10 @@ async def get_observation_transfers(
 
 
 async def get_transfers(address: str, chain: str, hours: int) -> TransferSet:
-    address = address.lower()
-    if chain not in _ALCHEMY_HOSTS:
-        return TransferSet(
-            [],
-            "unavailable",
-            f"no configured provider for chain: {chain}",
-            complete=False,
-        )
+    if is_evm_chain(chain):
+        address = address.lower()
+    if chain not in _ALCHEMY_HOSTS and chain not in {"solana", "tron", "bitcoin"}:
+        return TransferSet([], "unavailable", f"no configured provider for chain: {chain}", complete=False)
     now = _bucketed_now()
     key = (address, chain, hours, int(now.timestamp()))
 
@@ -434,13 +652,13 @@ async def get_transfers(address: str, chain: str, hours: int) -> TransferSet:
 
     since = now - timedelta(hours=hours)
 
-    if not settings.live_data_available:
+    if not settings.chain_live_data_available(chain):
+        result = TransferSet([], "unavailable", "live provider required for chain", complete=False)
+    elif not settings.live_data_available and chain in _ALCHEMY_HOSTS:
         if settings.strict_mode:
             result = TransferSet([], "unavailable", "strict_mode: no live data provider")
         else:
             result = _demo_transfers(address, chain, since, now)
-    elif _circuit_open(chain):
-        result = TransferSet([], "unavailable", "upstream circuit breaker open")
     else:
         result = await _fetch_live(address, chain, since)
 
@@ -459,6 +677,8 @@ async def get_transfers(address: str, chain: str, hours: int) -> TransferSet:
 
 async def native_balance(address: str, chain: str) -> tuple[float, str]:
     """Native token balance. Returns (balance, data_source)."""
+    if chain in {"solana", "tron", "bitcoin"}:
+        return 0.0, "live" if settings.live_data_available else "unavailable"
     if not is_evm_chain(chain):
         # Non-EVM registry entries (bitcoin, solana, tron) cannot be read with
         # the Alchemy EVM API. Return a clean degradation instead of raising —

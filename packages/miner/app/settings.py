@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # ALCHEMY_KEY is the only key that gates live data. Without it the miner
     # cannot observe chain state and falls back to the labeled demo feed.
     alchemy_key: str = ""
+    solana_rpc_url: str = "https://api.mainnet-beta.solana.com"
+    tron_api_url: str = "https://api.trongrid.io"
+    bitcoin_api_url: str = "https://mempool.space/api"
     # Optional. CoinGecko's free tier works unauthenticated; supplying a key
     # switches to the pro endpoint and raises rate limits.
     coingecko_key: str = ""
@@ -60,6 +63,10 @@ class Settings(BaseSettings):
     @property
     def live_data_available(self) -> bool:
         return bool(self.alchemy_key)
+
+    def chain_live_data_available(self, chain: str) -> bool:
+        """Return whether the adapter for one chain can make live reads."""
+        return self.live_data_available
 
 
 settings = Settings()

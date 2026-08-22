@@ -40,6 +40,9 @@ INDEXED_CHAINS: tuple[Chain, ...] = (
     "optimism",
     "bsc",
     "avalanche",
+    "solana",
+    "tron",
+    "bitcoin",
 )
 EVM_CHAINS = set(INDEXED_CHAINS)
 
@@ -84,6 +87,8 @@ class Casino:
     licensed_in: str | None = None
     established: int | None = None
     wallets: tuple[WalletCluster, ...] = ()
+    # Retained while the registry migration is reviewed; never queried.
+    legacy_wallets: tuple[WalletCluster, ...] = ()
 
     @property
     def is_attributed(self) -> bool:
@@ -206,6 +211,101 @@ def _supplied_explorer_label(address: str, chain: Chain, explorer_url: str) -> W
         evidence_status="curated",
         source="user-supplied block explorer",
     )
+
+
+def _gamstat_wallets(
+    casino_name: str,
+    slug: str,
+    labels: tuple[tuple[str, Chain, str], ...],
+) -> tuple[WalletCluster, ...]:
+    """Build chain-specific curated labels from Gamstat's public registry."""
+    source_url = f"https://gamstat.io/casinos/{slug}"
+    return tuple(
+        _gamstat_label(
+            address,
+            chain,
+            role,
+            casino_name=casino_name,
+            source_url=source_url,
+        )
+        for address, chain, role in labels
+    )
+
+
+ROLLBIT_GAMSTAT_WALLETS = _gamstat_wallets(
+    "Rollbit",
+    "rollbit",
+    (
+        ("0x8ae57a027c63fca8070d1bf38622321de8004c67", "ethereum", "cold"),
+        ("0xef8801eaf234ff82801821ffe2d78d60a0237f97", "ethereum", "hot"),
+        ("0xcbd6832ebc203e49e2b771897067fce3c58575ac", "ethereum", "hot"),
+        ("0x46dca395d20e63cb0fe1edc9f0e6f012e77c0913", "ethereum", "hot"),
+        ("0xcbd6832ebc203e49e2b771897067fce3c58575ac", "polygon", "hot"),
+        ("RBHdGVfDfMjfU6iUfCb1LczMJcQLx7hGnxbzRsoDNvx", "solana", "hot"),
+        ("3Hhh16urMb1fy6mk4jkjYyh4yiRzqyeUNT", "bitcoin", "hot"),
+        ("3MNNwkVDPWeysqKqp2PCMieia5aSQrasms", "bitcoin", "hot"),
+        ("3LHMJGV9nzVN4H714yEUTeXZaju91RVvAH", "bitcoin", "hot"),
+        ("39oL1SZiSJWnCdn7uM5xrjbvE8hFMgPnoa", "bitcoin", "hot"),
+    ),
+)
+
+BCGAME_GAMSTAT_WALLETS = _gamstat_wallets(
+    "BC.Game",
+    "bc-game",
+    (
+        ("JEBRptmAAjqtxg6c4WLQDaZPeEA8RXnW4dVyhvsvZnxQ", "solana", "hot"),
+        ("0xd352e0d71e14c45b719fe31d1eaa13051ede129b", "bsc", "hot"),
+        ("0xa7b9874d15742358fb455dd56f97c6d19ad74f5c", "base", "hot"),
+        ("0x6adc35bbdd759be047d9d28b94f5734a9c0cb563", "polygon", "hot"),
+        ("0xc199feb7ce2b17fa84162ee705ebb35a2f19407d", "ethereum", "hot"),
+        ("0xe7176831c898d585cd999bcee9984a7fa9a6be96", "arbitrum", "hot"),
+        ("0x120a5b1fd4782cd8639e3814781a5d30382e65db", "ethereum", "hot"),
+        ("0x49395574019ae44d46d535215303a09fd596727c", "bsc", "hot"),
+        ("bc1qqpdkczlc78nkss6wspse8rerf8u9eatce3mmk0", "bitcoin", "hot"),
+        ("0x3ba9ea0ffeff9efdd7cb7eafb3ac6788a21b5aa7", "ethereum", "cold"),
+        ("0xf09214d414312980446c5a6133b9c3db5918b7c5", "ethereum", "hot"),
+        ("0x788529118f2a28c60b9de2ba0353f5ee4293e044", "ethereum", "hot"),
+        ("0x41fc802e01bcf85d91e5708b42d41c2eaf01f375", "ethereum", "hot"),
+        ("0xe983fd1798689eee00c0fb77e79b8f372df41060", "ethereum", "hot"),
+        ("0x5472356f1de00bca5d729cfb6419c44b8d4488ab", "ethereum", "hot"),
+        ("0x9d2a0e32633d9be838bfde19d510e6aa6eb202dd", "ethereum", "hot"),
+        ("0x8aaf720bbbcac82c592ac8f6c628bbac1590e079", "ethereum", "hot"),
+        ("TTUM1sLKN5735BdrdsJqLPnYaKESeWQGkB", "tron", "hot"),
+    ),
+)
+
+SHUFFLE_GAMSTAT_WALLETS = _gamstat_wallets(
+    "Shuffle",
+    "shuffle",
+    (
+        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "ethereum", "cold"),
+        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "bsc", "cold"),
+        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "base", "hot"),
+        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "polygon", "hot"),
+        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "arbitrum", "hot"),
+        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "bsc", "hot"),
+        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "ethereum", "hot"),
+        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "polygon", "hot"),
+        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "base", "hot"),
+        ("76iXe9yKFDjGv3HicUVVy8AYxHLC71L1wYa12zaZzHHp", "solana", "hot"),
+        ("Eq9p5iHVbNR4miwmFMkpuPwLLULZmPTxNUPBgLdNrWYy", "solana", "hot"),
+        ("TWGSJz33dNGMhQYhSRLSKKUyFNewh8JEnp", "tron", "hot"),
+    ),
+)
+
+YEET_GAMSTAT_WALLETS = _gamstat_wallets(
+    "Yeet",
+    "yeet",
+    (
+        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "ethereum", "hot"),
+        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "polygon", "hot"),
+        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "bsc", "hot"),
+        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "arbitrum", "hot"),
+        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "base", "hot"),
+        ("TPKJ2wzjxASvQZQBmyegQrU1hExL2yvnLN", "tron", "hot"),
+        ("6UxrMpGdiqsncwBawPjxsZtQb3e6nsgYo1pVSbSeNAaE", "solana", "hot"),
+    ),
+)
 
 
 def _cross_chain_activity_label(address: str, chain: Chain) -> WalletCluster:
@@ -399,9 +499,7 @@ CASINOS: dict[str, Casino] = {
         website="https://rollbit.com",
         licensed_in="Curaçao",
         established=2020,
-        wallets=(
-            _seed("0xef4fb24ad0916217251f553c0596f8edc630eb66", "ethereum", "hot"),
-        ),
+        wallets=ROLLBIT_GAMSTAT_WALLETS,
     ),
     "bcgame": Casino(
         slug="bcgame",
@@ -409,7 +507,10 @@ CASINOS: dict[str, Casino] = {
         website="https://bc.game",
         licensed_in="Curaçao",
         established=2017,
-        wallets=(
+        wallets=BCGAME_GAMSTAT_WALLETS,
+        # The legacy inline list is retained in source history only; use the
+        # complete chain-specific Gamstat cluster above.
+        legacy_wallets=(
             _gamstat_label(
                 "JEBRptmAAjqtxg6c4WLQDaZPeEA8RXnW4dVyhvsvZnxQ", "solana",
                 casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
@@ -492,7 +593,8 @@ CASINOS: dict[str, Casino] = {
         website="https://shuffle.com",
         licensed_in="Anjouan",
         established=2023,
-        wallets=(
+        wallets=SHUFFLE_GAMSTAT_WALLETS,
+        legacy_wallets=(
             _gamstat_label(
                 "0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "bsc", "cold"
             ),
@@ -546,7 +648,7 @@ CASINOS: dict[str, Casino] = {
         name="Yeet",
         website="https://yeet.com",
         established=2023,
-        wallets=tuple(
+        legacy_wallets=tuple(
             _gamstat_label(
                 address,
                 chain,
@@ -563,6 +665,7 @@ CASINOS: dict[str, Casino] = {
                 ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "arbitrum"),
             )
         ),
+        wallets=YEET_GAMSTAT_WALLETS,
     ),
     "betfury": Casino(
         slug="betfury",

@@ -79,12 +79,12 @@ input_schema:
     anomaly endpoints accept a 0x-prefixed EVM address, chain, and optional
     lookback. Aggregate GET endpoints accept bounded query parameters. See each
     endpoint description for its exact request shape and default window. The
-    live EVM index is ethereum, base, polygon, arbitrum, optimism, bsc, and
-    avalanche. The registry can also display public labels from non-EVM
-    networks, but the current RPC adapter reports those as non-probeable rather
-    than silently treating them as zero. Availability also depends on reviewed
-    wallet attribution, upstream RPC health, token pricing, pagination limits,
-    and the requested lookback window.
+     live chain index is ethereum, base, polygon, arbitrum, optimism, bsc,
+     avalanche, solana, tron, and bitcoin. EVM reads use Alchemy; non-EVM native
+     transfer reads use configured Solana JSON-RPC, TronGrid, and Esplora
+     endpoints. Availability also depends on reviewed wallet attribution,
+     upstream health, token pricing, pagination limits, and the requested
+     lookback window.
   properties:
     slug:
       type: string
@@ -97,7 +97,7 @@ input_schema:
       examples: ["0x974caa59e49682cda0ad2bbe82983419a2ecc400"]
     chain:
       type: string
-      enum: [ethereum, base, polygon, arbitrum, optimism, bsc, avalanche]
+       enum: [ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin]
       default: ethereum
     hours:
       type: integer

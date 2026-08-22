@@ -1,5 +1,5 @@
 import Link from "next/link";
-import type { CasinoRanking, CasinoRegistry } from "@degenlens/shared";
+import type { CasinoRanking, CasinoRegistry, CasinoStats } from "@degenlens/shared";
 import { formatCount, formatUsd } from "@degenlens/shared";
 import { telegraph, telegraphMinerId } from "@/lib/telegraph";
 import { EvidenceClass } from "@/components/confidence";
@@ -15,6 +15,19 @@ async function direct<T>(endpoint: string) {
   }
 }
 
+async function stats(slug: string, hours: number) {
+  try {
+    return await telegraph.askDirect<CasinoStats>(
+      telegraphMinerId,
+      "/casino/stats",
+      { slug, hours },
+      "POST",
+    );
+  } catch {
+    return null;
+  }
+}
+
 export default async function IntelligencePage() {
   // Keep the landing page cheap and reliable. Ranking is an explicit operator
   // workflow; triggering two full registry scans during every homepage render
@@ -25,12 +38,56 @@ export default async function IntelligencePage() {
   ]);
   const day = dayResponse?.result;
   const registry = registryResponse?.result;
-  const rows = day?.ranking ?? [];
+  const rankingRows = day?.ranking ?? [];
+  // Ranking may contain a stale zero placeholder after a partial chain read.
+  // Recover those operators from their canonical stats endpoint before showing
+  // the market strip or activity table.
+  const fallbackOperators = rankingRows.length
+    ? rankingRows
+    : (registry?.casinos ?? []).filter((operator) => operator.wallet_count > 0).map((operator, index) => ({
+        rank: index + 1,
+        slug: operator.slug,
+        name: operator.name,
+        deposits_usd: 0,
+        withdrawals_usd: 0,
+        net_flow_usd: 0,
+        market_share_pct: 0,
+        unique_depositors: 0,
+        transaction_count: 0,
+        confidence: 0,
+        data_source: "unavailable" as const,
+        coverage_complete: false,
+      }));
+  const zeroRows = fallbackOperators.filter(
+    (row) => row.deposits_usd === 0 && row.withdrawals_usd === 0,
+  );
+  const recovered = await Promise.all(zeroRows.map((row) => stats(row.slug, 24)));
+  const recoveredBySlug = new Map(
+    zeroRows.map((row, index) => [row.slug, recovered[index]?.result]),
+  );
+  const rows = fallbackOperators.map((row) => {
+    const current = recoveredBySlug.get(row.slug);
+    return current && current.data_source !== "unavailable"
+      ? {
+          ...row,
+          deposits_usd: current.deposits_usd,
+          withdrawals_usd: current.withdrawals_usd,
+          net_flow_usd: current.net_flow_usd,
+          unique_depositors: current.unique_depositors,
+          transaction_count: current.transaction_count,
+          confidence: current.confidence,
+          data_source: current.data_source,
+          coverage_complete: current.coverage_complete,
+        }
+      : row;
+  });
   const claims = registry?.casinos.flatMap((operator) => operator.wallets ?? []) ?? [];
   const inbound = rows.reduce((sum, row) => sum + row.deposits_usd, 0);
   const outbound = rows.reduce((sum, row) => sum + row.withdrawals_usd, 0);
   const transfers = rows.reduce((sum, row) => sum + (row.transaction_count ?? 0), 0);
-  const flowAvailable = Boolean(day?.ranking && day.data_source !== "unavailable");
+  // A ranking can contain measured operators while one optional operator read
+  // is unavailable. Use the rows and keep the endpoint provenance visible.
+  const flowAvailable = rows.some((row) => row.data_source !== "unavailable");
   const registryAvailable = Boolean(registryResponse);
 
   return (

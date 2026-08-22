@@ -412,7 +412,7 @@ def coverage_report() -> dict:
         "operators_attributed": len(attributed),
         "operators_unattributed": len(unattributed),
         "wallet_clusters": sum(len(c.wallets) for c in attributed),
-        "chains_covered": list(INDEXED_CHAINS) if attributed else [],
+        "chains_covered": sorted({w.chain for c in attributed for w in c.wallets}),
         "chains_claimed": sorted({w.chain for c in attributed for w in c.wallets}),
         "attributed": [
             {

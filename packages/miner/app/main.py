@@ -1,7 +1,12 @@
-"""DegenMiner — Telegraph miner for on-chain gambling intelligence.
+"""DegenMiner — Telegraph miner for evidence-backed on-chain intelligence.
 
 Serves three canonical intents:
-  ONCHAIN_TX_LOOKUP · WALLET_BALANCE_CHECK · FRAUD_DETECTION
+    ONCHAIN_TX_LOOKUP · WALLET_BALANCE_CHECK · FRAUD_DETECTION
+
+The product is an intelligence supply layer, not a gambling operator, betting
+feed, profitability oracle, or legal-risk authority. It observes EVM transfers
+and RPC facts, joins them to a reviewed operator-wallet registry, derives
+scoped flow and counterparty metrics, and returns cautious anomaly signals.
 
 Endpoint paths mirror `config/miner.yaml`; the Telegraph Engine forwards each
 `POST /engine/v1/ask/{minerId}` to one of them.
@@ -21,6 +26,7 @@ A miner that throws is a miner that scores zero.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -31,7 +37,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from . import __version__, attribution, market, metrics, players, providers
-from .analytics import anomaly_check, casino_stats, rank_casinos, wallet_trace
+# Aliased: the module name collides with the `health` endpoint function below.
+from . import health as health_checks
+from .analytics import anomaly_check, cached_casino_stats, casino_stats, rank_casinos, wallet_trace
 from .onchain import circuit_status, transaction_lookup
 from .settings import settings
 from .wallets import all_casinos, catalog, get_casino, resolve_address, resolve_wallet
@@ -42,9 +50,13 @@ app = FastAPI(
     title="DegenMiner",
     version=__version__,
     description=(
-        "DegenMiner turns labeled on-chain casino activity into usable intelligence: "
-        "live deposit and withdrawal flows, wallet attribution, and explainable fraud signals. "
-        "Every answer includes confidence, reasoning, and data provenance for agents and analysts."
+        "DegenMiner is a Telegraph-compatible intelligence miner for observable on-chain "
+        "gambling activity. It answers transaction lookups, operator flow questions, wallet "
+        "attribution requests, counterparty analysis, and deterministic anomaly screens using "
+        "chain RPC data plus an explicit operator-wallet registry. It does not claim to see "
+        "private wagers, off-chain balances, operator revenue, solvency, or confirmed fraud. "
+        "Every answer includes confidence, reasoning, provenance, coverage, and caveats so "
+        "agents can use the result without confusing observed facts with inference."
     ),
 )
 
@@ -67,7 +79,29 @@ async def timing_and_safety(request: Request, call_next):
     started = time.perf_counter()
     endpoint = request.url.path
     try:
-        response = await call_next(request)
+        response = await asyncio.wait_for(
+            call_next(request), timeout=settings.request_timeout_s
+        )
+    except TimeoutError:
+        duration_ms = (time.perf_counter() - started) * 1000
+        metrics.record_request(endpoint, duration_ms, error=True)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "verdict": "unavailable",
+                "confidence": 0.0,
+                "reasoning": (
+                    f"Request exceeded the {settings.request_timeout_s:g}s service deadline; "
+                    "no partial result is presented as complete."
+                ),
+                "data_source": "unavailable",
+                "coverage_complete": False,
+                "caveat": "Retry later or request a narrower lookback window.",
+                "error": "request_timeout",
+                "served_at": _now_iso(),
+                "timestamp": _now_iso(),
+            },
+        )
     except Exception as exc:  # noqa: BLE001
         duration_ms = (time.perf_counter() - started) * 1000
         metrics.record_request(endpoint, duration_ms, error=True)
@@ -167,7 +201,7 @@ PRODUCT_HTML = """<!doctype html>
     <section class="section panel" id="operators"><div class="panel-head"><h2>Operator coverage</h2><p>Registry claims with explicit evidence status</p></div><div class="panel-body" id="operator-list"><p class="note">Loading registry...</p></div></section>
   </main>
   <footer><div class="shell footerin"><span>Observed facts / calculated metrics / explicit inference</span><span>Intelligence served by DegenMiner through Telegraph Protocol</span></div></footer>
-  <dialog id="investigation"><div class="dialog-head"><div><div class="type">Universal investigation</div><strong>Resolve an entity</strong></div><button class="close" aria-label="Close">x</button></div><div class="dialog-body"><form class="global-search" id="dialog-form"><input id="dialog-input" aria-label="Entity" placeholder="Stake, 0x address, or transaction hash"><select id="chain" aria-label="Chain"><option>ethereum</option><option>base</option><option>polygon</option><option>arbitrum</option></select><button>Investigate</button></form><div id="result"></div></div></dialog>
+  <dialog id="investigation"><div class="dialog-head"><div><div class="type">Universal investigation</div><strong>Resolve an entity</strong></div><button class="close" aria-label="Close">x</button></div><div class="dialog-body"><form class="global-search" id="dialog-form"><input id="dialog-input" aria-label="Entity" placeholder="Stake, 0x address, or transaction hash"><select id="chain" aria-label="Chain"><option>ethereum</option><option>base</option><option>polygon</option><option>arbitrum</option><option>optimism</option><option>bsc</option><option>avalanche</option></select><button>Investigate</button></form><div id="result"></div></div></dialog>
   <script>
     const $ = s => document.querySelector(s);
     const money = n => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',notation:'compact',maximumFractionDigits:2}).format(n||0);
@@ -183,7 +217,7 @@ PRODUCT_HTML = """<!doctype html>
         $('#operator-count').textContent = number(catalog.count); $('#claim-count').textContent = number(claims.length); $('#leader').textContent = day.ranking[0]?.name||'Unavailable'; $('#transfers').textContent = number(day.ranking.reduce((s,r)=>s+(r.transaction_count||0),0));
         $('#source').textContent = (day.data_source||'unknown')+' chain data'; const max = Math.max(0,...claims.map(c=>c.confidence)); $('#label-confidence').textContent = (claims[0]?.evidence_status||'unavailable')+' / '+Math.round(max*100)+'%';
         $('#feed').innerHTML = day.ranking.map(row=>{const prior=week.ranking.find(r=>r.slug===row.slug);const baseline=(prior?.deposits_usd||0)/7;const change=baseline?((row.deposits_usd-baseline)/baseline)*100:0;const elevated=Math.abs(change)>=40;return '<article class="feed-item"><div class="feed-top"><div><div class="type '+(elevated?'elevated':'observed')+'">'+(elevated?'Elevated':'Informational')+' / flow change</div><h3>'+esc(row.name)+' inbound flow is '+(change>=0?'above':'below')+' its 7-day daily average</h3></div><span class="delta">'+(change>=0?'+':'')+change.toFixed(1)+'%</span></div><p>Observed '+money(row.deposits_usd)+' inbound and '+money(row.withdrawals_usd)+' outbound across attributed wallets in 24 hours.</p><div class="type calculated" style="margin-top:10px">Calculated / investigate in operator coverage</div></article>'}).join('');
-        $('#operator-list').innerHTML = catalog.casinos.map(c=>'<button class="operator-link" data-operator="'+esc(c.slug)+'"><div class="feed-top"><div><strong>'+esc(c.name)+'</strong><div class="note">'+c.wallet_count+' claims / '+esc(c.chains.join(', '))+'</div></div><span class="confidence">'+esc(c.wallets?.[0]?.evidence_status||'unknown')+' / '+Math.round((c.wallets?.[0]?.confidence||0)*100)+'%</span></div></button>').join('');
+        $('#operator-list').innerHTML = catalog.casinos.map(c=>'<button class="operator-link" data-operator="'+esc(c.slug)+'"><div class="feed-top"><div><strong>'+esc(c.name)+'</strong><div class="note">'+c.wallet_count+' claims / '+esc((c.queried_chains&&c.queried_chains.length?c.queried_chains:c.chains).join(', ')||'unobserved')+'</div></div><span class="confidence">'+esc(c.wallets?.[0]?.evidence_status||'unknown')+' / '+Math.round((c.wallets?.[0]?.confidence||0)*100)+'%</span></div></button>').join('');
         document.querySelectorAll('[data-operator]').forEach(button=>button.onclick=()=>investigate(button.dataset.operator));
       } catch (error) { $('#source').textContent='Data unavailable'; $('#feed').innerHTML='<p class="note">'+esc(error.message)+'</p>'; }
     }
@@ -208,18 +242,59 @@ class CasinoStatsRequest(BaseModel):
 
 class WalletTraceRequest(BaseModel):
     address: str = Field(..., description="Wallet address (0x-prefixed, 40 hex chars)")
-    chain: str = Field("ethereum", description="ethereum | base | polygon | arbitrum")
+    chain: str = Field("ethereum", pattern=r"^(ethereum|base|polygon|arbitrum|optimism|bsc|avalanche)$", description="ethereum | base | polygon | arbitrum | optimism | bsc | avalanche")
 
 
 class AnomalyRequest(BaseModel):
     address: str = Field(..., description="Wallet address to screen")
-    chain: str = Field("ethereum", description="ethereum | base | polygon | arbitrum")
+    chain: str = Field("ethereum", pattern=r"^(ethereum|base|polygon|arbitrum|optimism|bsc|avalanche)$", description="ethereum | base | polygon | arbitrum | optimism | bsc | avalanche")
     hours: int = Field(24, ge=1, le=720, description="Lookback window in hours")
 
 
 class TransactionLookupRequest(BaseModel):
     tx_hash: str = Field(..., pattern=r"^0x[a-fA-F0-9]{64}$")
-    chain: str = Field("ethereum", pattern=r"^(ethereum|base|polygon|arbitrum)$")
+    chain: str = Field("ethereum", pattern=r"^(ethereum|base|polygon|arbitrum|optimism|bsc|avalanche)$")
+
+
+def _public_operator_payload(stats) -> dict[str, Any]:
+    operator = get_casino(stats.slug)
+    return {
+        "slug": stats.slug,
+        "name": stats.name,
+        "website": operator.website if operator else None,
+        "licensed_in": operator.licensed_in if operator else None,
+        "established": operator.established if operator else None,
+        "window_hours": stats.window_hours,
+        "observed_inbound_usd": stats.observed_inbound_usd,
+        "observed_outbound_usd": stats.observed_outbound_usd,
+        "attributed_customer_inflow_usd": stats.deposits_usd,
+        "attributed_customer_outflow_usd": stats.withdrawals_usd,
+        "internal_transfers_usd": stats.internal_transfers_usd,
+        "unknown_flow_usd": stats.unknown_flow_usd,
+        "net_observed_flow_usd": round(stats.observed_inbound_usd - stats.observed_outbound_usd, 2),
+        "net_customer_flow_usd": stats.net_flow_usd,
+        "deposits_usd": stats.deposits_usd,
+        "withdrawals_usd": stats.withdrawals_usd,
+        "net_flow_usd": stats.net_flow_usd,
+        "unique_depositors": stats.unique_depositors,
+        "unique_withdrawers": stats.unique_withdrawers,
+        "transaction_count": stats.transaction_count,
+        "wallet_count": stats.wallet_count,
+        "chains": stats.chains,
+        "chains_claimed": stats.chains_claimed,
+        "chains_queried": stats.chains_queried,
+        "indexed_chains": stats.chains_queried,
+        "by_chain": stats.by_chain,
+        "coverage_complete": stats.coverage_complete,
+        "coverage": stats.coverage,
+        "coverage_status": "complete" if stats.coverage_complete else "partial",
+        "confidence": stats.confidence,
+        "classification": "CALCULATED",
+        "evidence": stats.evidence,
+        "duplicate_count": stats.duplicate_count,
+        "data_source": stats.data_source,
+        "verdict": "net_inflow" if stats.net_flow_usd >= 0 else "net_outflow",
+    }
 
 
 # ── Meta ─────────────────────────────────────────────────────────────────────
@@ -238,8 +313,9 @@ async def meta() -> dict[str, Any]:
         "name": "DegenMiner",
         "version": __version__,
         "description": (
-            "Live on-chain casino flow, wallet attribution, and explainable fraud "
-            "signals for agents and analysts."
+            "Telegraph miner providing evidence-backed transaction, wallet, operator-flow, "
+            "counterparty, attribution, and anomaly intelligence for observable on-chain "
+            "gambling activity."
         ),
         "supported_intents": SUPPORTED_INTENTS,
         "casinos_tracked": len(all_casinos()),
@@ -252,7 +328,7 @@ async def meta() -> dict[str, Any]:
 async def health() -> dict[str, Any]:
     """Liveness + readiness. Always 200 so the node never sees a hard failure."""
     circuit = circuit_status()
-    ready = settings.live_data_available and not circuit["open"]
+    ready = settings.live_data_available and not circuit.get("fully_open", circuit["open"])
     return {
         "status": "ok",
         "ready": ready,
@@ -292,31 +368,19 @@ async def casino_stats_endpoint(req: CasinoStatsRequest) -> dict[str, Any]:
             "known_slugs": [c.slug for c in all_casinos()],
         })
 
+    public = _public_operator_payload(stats)
     return _stamp({
-        "slug": stats.slug,
-        "name": stats.name,
-        "window_hours": stats.window_hours,
-        "observed_inbound_usd": stats.observed_inbound_usd,
-        "observed_outbound_usd": stats.observed_outbound_usd,
-        # Compatibility aliases for existing consumers.
-        "deposits_usd": stats.deposits_usd,
-        "withdrawals_usd": stats.withdrawals_usd,
-        "net_flow_usd": stats.net_flow_usd,
-        "unique_depositors": stats.unique_depositors,
-        "transaction_count": stats.transaction_count,
-        "wallet_count": stats.wallet_count,
-        "chains": stats.chains,
+        **public,
         "total_usd": stats.deposits_usd,  # on_chain integer extraction target
-        "confidence": stats.confidence,
-        "verdict": "net_inflow" if stats.net_flow_usd >= 0 else "net_outflow",
         "reasoning": (
             f"Observed {stats.transaction_count} transfers across {stats.wallet_count} "
-            f"labeled {stats.name} wallets over {stats.window_hours}h. "
+            f"labeled {stats.name} wallets on {len(stats.chains) or len(stats.chains_queried)} "
+            f"chain(s) over {stats.window_hours}h. "
             f"Inbound ${stats.deposits_usd:,.0f}, outbound ${stats.withdrawals_usd:,.0f}, "
             f"net ${stats.net_flow_usd:,.0f} from {stats.unique_depositors} unique inbound counterparties. "
-            "Transfer direction does not by itself prove a player deposit or withdrawal."
+            + ("Coverage is partial because one or more indexed chain reads failed. " if not stats.coverage_complete else "")
+            + "Transfer direction does not by itself prove a player deposit or withdrawal."
         ),
-        "data_source": stats.data_source,
     })
 
 
@@ -338,6 +402,43 @@ async def casino_ranking_endpoint(hours: int = 168) -> dict[str, Any]:
             + (f" {ranking[0]['name']} leads with "
                f"${ranking[0]['deposits_usd']:,.0f} "
                f"({ranking[0]['market_share_pct']}% share)." if ranking else "")
+        ),
+        "data_source": source,
+    })
+
+
+@app.get("/operators/public", tags=["ONCHAIN_TX_LOOKUP"])
+async def public_operators_endpoint(hours: int = 168) -> dict[str, Any]:
+    """Public identity and multi-chain observations for attributed operators."""
+    hours = max(1, min(hours, 720))
+    operators = all_casinos()
+    stats = (
+        [cached_casino_stats(operator.slug, hours) for operator in operators]
+        if settings.live_data_available
+        else await asyncio.gather(*(casino_stats(operator.slug, hours) for operator in operators))
+    )
+    snapshots = [_public_operator_payload(row) for row in stats if row is not None]
+    sources = [row["data_source"] for row in snapshots]
+    source = (
+        "unavailable" if sources and all(value == "unavailable" for value in sources)
+        else "demo" if "demo" in sources
+        else "live" if "live" in sources
+        else "unavailable"
+    )
+    # Every operator declares its own set of registered chains — the
+    # top-level `indexed_chains` is the union so a caller sees the full
+    # network coverage across the operator set, not just the first row's.
+    all_chains = sorted({chain for row in snapshots for chain in row["indexed_chains"]})
+    return _stamp({
+        "count": len(snapshots),
+        "window_hours": hours,
+        "indexed_chains": all_chains,
+        "operators": snapshots,
+        "confidence": min((row["confidence"] for row in snapshots), default=0.0),
+        "verdict": f"{len(snapshots)}_operators_multichain",
+        "reasoning": (
+            f"Returned public identity and chain-by-chain observations for {len(snapshots)} "
+            f"operators across {len(all_chains)} indexed chains."
         ),
         "data_source": source,
     })
@@ -511,6 +612,7 @@ async def list_casinos() -> dict[str, Any]:
                 "wallet_count": len(c.wallets),
                 "attribution_status": "attributed" if c.is_attributed else "unobserved",
                 "chains": sorted({w.chain for w in c.wallets}),
+                "queried_chains": c.queried_chains,
                 "wallets": [
                     {
                         "address": w.address,
@@ -519,6 +621,8 @@ async def list_casinos() -> dict[str, Any]:
                         "confidence": w.confidence,
                         "evidence_status": w.evidence_status,
                         "evidence": list(w.evidence),
+                        "source": w.source,
+                        "discovered_at": w.discovered_at,
                         "last_reviewed": w.last_reviewed,
                     }
                     for w in c.wallets
@@ -709,7 +813,7 @@ def _flow_confidence(source: str, complete: bool) -> float:
 
 class PlayerEvaluateRequest(BaseModel):
     address: str = Field(..., description="Wallet address to evaluate")
-    chain: str = Field("ethereum", description="ethereum | base | polygon | arbitrum")
+    chain: str = Field("ethereum", pattern=r"^(ethereum|base|polygon|arbitrum|optimism|bsc|avalanche)$", description="ethereum | base | polygon | arbitrum | optimism | bsc | avalanche")
     hours: int = Field(720, ge=1, le=720, description="Lookback window in hours")
 
 
@@ -720,10 +824,10 @@ async def player_evaluate_endpoint(req: PlayerEvaluateRequest) -> dict[str, Any]
 
     if p.is_operator_wallet:
         verdict = "operator_wallet"
-    elif p.entity_class == "infrastructure":
-        verdict = "infrastructure"
     elif p.transfers_with_operators == 0:
         verdict = "no_operator_activity"
+    elif p.entity_class == "infrastructure":
+        verdict = "infrastructure"
     else:
         verdict = "net_positive" if p.net_position_usd >= 0 else "net_negative"
 
@@ -800,13 +904,15 @@ async def player_evaluate_endpoint(req: PlayerEvaluateRequest) -> dict[str, Any]
 
 @app.get("/players/leaderboard", tags=["WALLET_BALANCE_CHECK"])
 async def player_leaderboard_endpoint(
-    hours: int = 168, limit: int = 25, include_infrastructure: bool = False
+    hours: int = 168, limit: int = 25, include_infrastructure: bool = False,
+    casino: str | None = None,
 ) -> dict[str, Any]:
     """Counterparties ranked by net observed position across operator clusters."""
     hours = max(1, min(hours, 720))
     limit = max(1, min(limit, 100))
     result = await players.player_leaderboard(
-        hours, limit, exclude_infrastructure=not include_infrastructure
+        hours, limit, exclude_infrastructure=not include_infrastructure,
+        casino_slug=casino,
     )
     top = result["net_positive"][0] if result["net_positive"] else None
     return _stamp({
@@ -817,7 +923,8 @@ async def player_leaderboard_endpoint(
             else "no_observed_activity"
         ),
         "reasoning": (
-            f"{result['addresses_observed']} distinct counterparties observed across "
+            f"{result['addresses_observed']} distinct counterparties observed "
+            f"{f'for {casino} ' if casino else 'across '}"
             f"attributed clusters over {hours}h. "
             f"{result['individual_candidates']} classified as individual candidates; "
             f"{result['infrastructure_excluded']} classified as infrastructure and "
@@ -1016,4 +1123,55 @@ async def player_overlap_endpoint(hours: int = 168) -> dict[str, Any]:
                 if top else ""
             )
         ),
+    })
+
+
+# ── Label health ─────────────────────────────────────────────────────────────
+#
+# Every figure this miner produces is downstream of a wallet label, and a label
+# can be wrong in ways that look identical to a real zero. These endpoints make
+# that difference visible instead of letting a bad label quietly deflate an
+# aggregate.
+
+
+@app.get("/health/registry", tags=["catalog"])
+async def registry_health_endpoint(hours: int = 168) -> dict[str, Any]:
+    """Health of every attributed operator's wallet claims."""
+    hours = max(1, min(hours, 720))
+    result = await health_checks.registry_health(hours)
+    return _stamp({
+        **result,
+        "confidence": 0.9,  # a probe is a direct chain read
+        "verdict": (
+            f"{result['operators_reportable']}/{result['operators_attributed']}_reportable"
+        ),
+        "reasoning": result["registry_verdict"] + (
+            f" {result['dead_label_count']} claimed address(es) have no transfer "
+            f"history at all — those labels are wrong, not quiet."
+            if result["dead_label_count"] else ""
+        ),
+        "data_source": "live",
+    })
+
+
+@app.get("/health/operator/{slug}", tags=["catalog"])
+async def operator_health_endpoint(slug: str, hours: int = 168) -> dict[str, Any]:
+    """Health of one operator's wallet claims."""
+    hours = max(1, min(hours, 720))
+    casino = get_casino(slug)
+    if not casino:
+        return _stamp({
+            "slug": slug,
+            "confidence": 0.0,
+            "verdict": "unknown_operator",
+            "reasoning": f"'{slug}' is not in the catalog.",
+            "data_source": "unavailable",
+        })
+    result = await health_checks.operator_health(casino, hours)
+    return _stamp({
+        **result,
+        "confidence": 0.9 if result["total_claims"] else 1.0,
+        "verdict": result["attribution_status"],
+        "reasoning": result["detail"],
+        "data_source": "live" if result["total_claims"] else "registry",
     })

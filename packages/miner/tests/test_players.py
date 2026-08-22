@@ -191,3 +191,36 @@ def test_leaderboard_ranks_only_individual_candidates_by_default():
     body = client.get("/players/leaderboard?hours=24&limit=10").json()
     for row in body["net_positive"] + body["net_negative"]:
         assert row["entity_class"] == "individual_candidate"
+
+
+def test_leaderboard_has_honest_per_casino_boards():
+    body = client.get("/players/leaderboard?hours=24&limit=3").json()
+    assert body["by_casino"]
+    for casino in body["by_casino"]:
+        assert {
+            "slug", "name", "chains_attributed", "chains_observed",
+            "by_settlement_volume", "net_received", "net_sent",
+        } <= set(casino)
+        for row in (
+            casino["by_settlement_volume"] + casino["net_received"] + casino["net_sent"]
+        ):
+            assert row["entity_class"] != "infrastructure"
+            assert isinstance(row["chains"], list)
+    assert isinstance(body["chains_attributed"], list)
+    assert isinstance(body["chains_observed"], list)
+    assert isinstance(body["chains_queried"], list)
+    from app.wallets import get_casino
+
+    # `chains_queried` reflects the actual registered chain identities across
+    # every attributed operator, not a fixed EVM list.
+    all_registered = {
+        w.chain
+        for c in body["by_casino"]
+        for w in get_casino(c["slug"]).wallets
+    }
+    assert set(body["chains_queried"]) >= all_registered
+    for casino in body["by_casino"]:
+        assert isinstance(casino["chains_observed"], list)
+        registered = {w.chain for w in get_casino(casino["slug"]).wallets}
+        assert set(casino["chains_queried"]) == registered
+    assert "not amount wagered or gambling profit/loss" in body["methodology"]

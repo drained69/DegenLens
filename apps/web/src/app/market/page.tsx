@@ -5,7 +5,7 @@ import type {
   NetworkDistribution,
 } from "@degenlens/shared";
 import { formatCount, formatUsd } from "@degenlens/shared";
-import { telegraph } from "@/lib/telegraph";
+import { telegraph, telegraphMinerId } from "@/lib/telegraph";
 import { Panel, Stat } from "@/components/panel";
 import { EvidenceClass } from "@/components/confidence";
 import { DataSourceBadge, ProvenanceNotice } from "@/components/data-source";
@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 
 async function direct<T>(endpoint: string) {
   try {
-    return await telegraph.askDirect<T>("local", endpoint, {}, "GET");
+    return await telegraph.askDirect<T>(telegraphMinerId, endpoint, {}, "GET");
   } catch {
     return null;
   }
@@ -130,9 +130,9 @@ export default async function MarketPage({
               <div className="mt-4 border-t border-ink-700 pt-3">
                 <EvidenceClass kind="calculated" />
                 <p className="mt-2 text-xs leading-5 text-slate-500">
-                  Covers {networks.chains_observed} chain(s) where attributed
-                  clusters exist. Chains with no attributed wallet are absent,
-                  not zero.
+                  Covers {networks.chains_observed} chain(s) with priced flow.
+                  Attributed EVM addresses are queried on every indexed
+                  network; a quiet chain is absent, not zero.
                 </p>
               </div>
             </>
@@ -183,11 +183,11 @@ export default async function MarketPage({
             <div className="mb-5 grid gap-3 sm:grid-cols-4">
               <Stat
                 label="Operators catalogued"
-                value={String(coverage.operators_catalogued)}
+                value={String(coverage.operators_attributed)}
               />
               <Stat
-                label="With wallet claims"
-                value={String(coverage.operators_attributed)}
+                label="Registry entries"
+                value={String(coverage.operators_catalogued)}
                 positive
               />
               <Stat

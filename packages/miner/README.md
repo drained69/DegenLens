@@ -105,7 +105,8 @@ signal-mapping contract compliance, and never-5xx behavior.
 
 ## Deploy
 
-Live on Railway: **https://degenminer-production.up.railway.app**
+The registered combined Railway deployment is:
+**https://degenlensv1.up.railway.app**
 
 ```bash
 railway up                      # redeploy

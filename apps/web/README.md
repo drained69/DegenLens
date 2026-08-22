@@ -13,7 +13,21 @@ pnpm --filter web dev
 # → http://localhost:3000
 ```
 
-By default the app calls `LOCAL_MINER_URL` (default `http://localhost:8787`) so you don't need a funded wallet to develop. To route through the real Telegraph testnet, install `@x402/fetch` and pass a wrapped fetch into the `TelegraphClient` in `src/lib/telegraph.ts`.
+By default `TELEGRAPH_MINER_ID=local`, so the app calls `LOCAL_MINER_URL`
+(default `http://localhost:8787`) without requiring a funded wallet. Production
+uses the same direct miner path in the combined Docker deployment, where the
+web app and miner share one Railway service. A separately deployed web app can
+use the Telegraph Engine when `TELEGRAPH_MINER_ID` is the active numeric ID
+from `GET /api/miners`. Set `EVM_PRIVATE_KEY` for a Base Sepolia wallet holding
+USDC; the server wraps fetch with x402 and handles the 402 challenge and paid
+retry automatically. Never expose that key to browser code.
+
+```bash
+TELEGRAPH_NODE_URL=https://devnode.telegraphprotocol.com
+TELEGRAPH_MINER_ID=<active numeric miner id>
+EVM_PRIVATE_KEY=0x...
+LOCAL_MINER_URL=http://localhost:8787
+```
 
 ## Routes
 

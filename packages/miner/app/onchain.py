@@ -56,6 +56,21 @@ class TransferSet:
     complete: bool = True
 
 
+def merge_cluster_reads(sets: list[TransferSet]) -> tuple[str, bool]:
+    """Provenance across a multi-chain cluster read.
+
+    Extra-chain RPC failures must not poison a successful read. An Alchemy
+    plan that lacks BSC should not make Ethereum figures look unavailable.
+    """
+    useful = [s for s in sets if s.data_source != "unavailable"]
+    if not useful:
+        return "unavailable", False
+    source = "demo" if any(s.data_source == "demo" for s in useful) else "live"
+    # An unavailable chain is a coverage gap even when another chain returned
+    # live data. Never let a partial multi-chain read report complete coverage.
+    return source, all(s.complete and s.data_source != "unavailable" for s in sets)
+
+
 @dataclass
 class TransactionRecord:
     tx_hash: str
@@ -84,37 +99,48 @@ def stable_seed(*parts: str) -> int:
 
 
 # ── Circuit breaker ──────────────────────────────────────────────────────────
+# Per-chain: a BSC plan gap must not open the breaker for Ethereum. Multi-chain
+# observation would otherwise trip the global breaker after a few extra-chain
+# 404s and make Stake look like it had no data at all.
 
-_consecutive_failures = 0
-_circuit_opened_at: float | None = None
+_consecutive_failures: dict[str, int] = {}
+_circuit_opened_at: dict[str, float] = {}
 
 
-def _circuit_open() -> bool:
-    global _circuit_opened_at
-    if _circuit_opened_at is None:
+def _circuit_open(chain: str) -> bool:
+    opened = _circuit_opened_at.get(chain)
+    if opened is None:
         return False
-    if time.monotonic() - _circuit_opened_at >= settings.circuit_cooldown_s:
-        _circuit_opened_at = None
+    if time.monotonic() - opened >= settings.circuit_cooldown_s:
+        _circuit_opened_at.pop(chain, None)
         return False
     return True
 
 
-def _record_upstream_result(*, ok: bool) -> None:
-    global _consecutive_failures, _circuit_opened_at
+def _record_upstream_result(*, ok: bool, chain: str) -> None:
     metrics.record_upstream(failed=not ok)
     if ok:
-        _consecutive_failures = 0
+        _consecutive_failures[chain] = 0
         return
-    _consecutive_failures += 1
-    if _consecutive_failures >= settings.circuit_threshold:
-        _circuit_opened_at = time.monotonic()
+    _consecutive_failures[chain] = _consecutive_failures.get(chain, 0) + 1
+    if _consecutive_failures[chain] >= settings.circuit_threshold:
+        _circuit_opened_at[chain] = time.monotonic()
 
 
 def circuit_status() -> dict[str, object]:
+    open_chains = [chain for chain in list(_circuit_opened_at) if _circuit_open(chain)]
     return {
-        "open": _circuit_open(),
-        "consecutive_failures": _consecutive_failures,
+        "open": bool(open_chains),
+        "fully_open": bool(open_chains) and set(open_chains) >= set(_ALCHEMY_HOSTS),
+        "open_chains": open_chains,
+        "consecutive_failures": dict(_consecutive_failures),
     }
+
+
+def reset_circuits() -> None:
+    """Test helper: drop per-chain breaker state."""
+    _consecutive_failures.clear()
+    _circuit_opened_at.clear()
 
 
 # ── Alchemy ──────────────────────────────────────────────────────────────────
@@ -141,6 +167,17 @@ NATIVE_SYMBOL = {
 }
 
 SUPPORTED_CHAINS = tuple(_ALCHEMY_HOSTS)
+
+
+def is_evm_chain(chain: str) -> bool:
+    """True when we can read the chain via the Alchemy EVM API.
+
+    Non-EVM chains (bitcoin, solana, tron) legitimately appear in the wallet
+    registry — their identity is public gambling infrastructure — but they
+    cannot be probed with `alchemy_getAssetTransfers`. Callers must skip
+    cleanly rather than treat the raise as an outage.
+    """
+    return chain in _ALCHEMY_HOSTS
 
 
 def _alchemy_host(chain: str) -> str:
@@ -235,19 +272,39 @@ async def _fetch_live(address: str, chain: str, since: datetime) -> TransferSet:
     Inbound-only was the withdrawals-always-zero bug; single-page was the
     identical-across-windows bug.
     """
+    if not is_evm_chain(chain):
+        return TransferSet(
+            [], "unsupported_chain",
+            f"{chain} is a registry identity, not an Alchemy-readable EVM chain",
+        )
     url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
     try:
-        async with _upstream_sem:
-            async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
-                (inbound, in_ok), (outbound, out_ok) = await asyncio.gather(
-                    _alchemy_transfers_paged(client, url, address, "in", since),
-                    _alchemy_transfers_paged(client, url, address, "out", since),
-                )
+        # A burst of seven chains x two directions can trigger provider 429s.
+        # Retry the complete pair after a short backoff; retrying one direction
+        # alone would produce asymmetric inbound/outbound totals.
+        for attempt in range(3):
+            try:
+                async with _upstream_sem:
+                    async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                        (inbound, in_ok), (outbound, out_ok) = await asyncio.gather(
+                            _alchemy_transfers_paged(client, url, address, "in", since),
+                            _alchemy_transfers_paged(client, url, address, "out", since),
+                        )
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(0.25 * (attempt + 1))
     except Exception as exc:  # noqa: BLE001 - upstream failures must not 500
-        _record_upstream_result(ok=False)
-        return TransferSet([], "unavailable", f"upstream error: {type(exc).__name__}")
+        _record_upstream_result(ok=False, chain=chain)
+        return TransferSet(
+            [],
+            "unavailable",
+            f"upstream error: {type(exc).__name__}",
+            complete=False,
+        )
 
-    _record_upstream_result(ok=True)
+    _record_upstream_result(ok=True, chain=chain)
     rows = [(row, "in") for row in inbound] + [(row, "out") for row in outbound]
     transfers = [
         _to_transfer(row, chain, direction)
@@ -344,8 +401,28 @@ def _bucketed_now() -> datetime:
     return datetime.fromtimestamp(epoch, tz=timezone.utc)
 
 
+async def get_observation_transfers(
+    address: str, chain: str, hours: int, *, seed: bool
+) -> TransferSet:
+    """Fetch transfers for an operator identity on one chain.
+
+    Operator aggregation always performs the full bidirectional, paginated
+    read. A cheap probe is not sufficient for a completeness claim: it can hide
+    older activity and makes a quiet chain indistinguishable from an incomplete
+    read.
+    """
+    return await get_transfers(address, chain, hours)
+
+
 async def get_transfers(address: str, chain: str, hours: int) -> TransferSet:
     address = address.lower()
+    if chain not in _ALCHEMY_HOSTS:
+        return TransferSet(
+            [],
+            "unavailable",
+            f"no configured provider for chain: {chain}",
+            complete=False,
+        )
     now = _bucketed_now()
     key = (address, chain, hours, int(now.timestamp()))
 
@@ -362,13 +439,16 @@ async def get_transfers(address: str, chain: str, hours: int) -> TransferSet:
             result = TransferSet([], "unavailable", "strict_mode: no live data provider")
         else:
             result = _demo_transfers(address, chain, since, now)
-    elif _circuit_open():
+    elif _circuit_open(chain):
         result = TransferSet([], "unavailable", "upstream circuit breaker open")
     else:
         result = await _fetch_live(address, chain, since)
 
     # Only cache successful reads; failures should retry on the next request.
-    if result.data_source != "unavailable":
+    # Busy operator wallets can return thousands of transfers. Retaining several
+    # such sets exhausts small production containers during registry-wide views;
+    # cache only compact reads and let large reads be garbage-collected.
+    if result.data_source != "unavailable" and len(result.transfers) <= 1000:
         _CACHE[key] = (result, time.monotonic() + settings.stats_ttl)
         # Bound cache growth.
         if len(_CACHE) > 2048:
@@ -379,13 +459,19 @@ async def get_transfers(address: str, chain: str, hours: int) -> TransferSet:
 
 async def native_balance(address: str, chain: str) -> tuple[float, str]:
     """Native token balance. Returns (balance, data_source)."""
+    if not is_evm_chain(chain):
+        # Non-EVM registry entries (bitcoin, solana, tron) cannot be read with
+        # the Alchemy EVM API. Return a clean degradation instead of raising —
+        # a raise here bubbles all the way to a 200 with confidence 0 and
+        # deflates every aggregate that iterates the whole registry.
+        return 0.0, "unsupported_chain"
     if not settings.live_data_available:
         if settings.strict_mode:
             return 0.0, "unavailable"
         rng = random.Random(stable_seed(address.lower(), chain, "balance"))
         return round(rng.uniform(100, 50_000), 6), "demo"
 
-    if _circuit_open():
+    if _circuit_open(chain):
         return 0.0, "unavailable"
 
     url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
@@ -397,10 +483,10 @@ async def native_balance(address: str, chain: str) -> tuple[float, str]:
                 r.raise_for_status()
                 hex_wei = r.json().get("result", "0x0")
     except Exception:  # noqa: BLE001
-        _record_upstream_result(ok=False)
+        _record_upstream_result(ok=False, chain=chain)
         return 0.0, "unavailable"
 
-    _record_upstream_result(ok=True)
+    _record_upstream_result(ok=True, chain=chain)
     return int(hex_wei, 16) / 1e18, "live"
 
 
@@ -410,7 +496,7 @@ async def transaction_lookup(tx_hash: str, chain: str) -> tuple[TransactionRecor
         return None, "unsupported_chain"
     if not settings.live_data_available:
         return None, "live provider required; transaction data is never synthesized"
-    if _circuit_open():
+    if _circuit_open(chain):
         return None, "upstream circuit breaker open"
 
     url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
@@ -422,10 +508,10 @@ async def transaction_lookup(tx_hash: str, chain: str) -> tuple[TransactionRecor
                     _rpc(client, url, "eth_getTransactionReceipt", [tx_hash]),
                 )
     except Exception as exc:  # noqa: BLE001
-        _record_upstream_result(ok=False)
+        _record_upstream_result(ok=False, chain=chain)
         return None, f"upstream error: {type(exc).__name__}"
 
-    _record_upstream_result(ok=True)
+    _record_upstream_result(ok=True, chain=chain)
     if not isinstance(tx, dict):
         return None, "transaction not found"
     receipt_data = receipt if isinstance(receipt, dict) else {}
@@ -462,19 +548,69 @@ class TokenBalance:
     amount: float
 
 
-# Contract → (symbol, decimals) for the assets that dominate casino treasuries.
-# Resolving metadata per contract costs a round trip each, so the common ones
-# are pinned and anything else falls back to a lookup.
-KNOWN_TOKENS: dict[str, tuple[str, int]] = {
-    "0xdac17f958d2ee523a2206206994597c13d831ec7": ("USDT", 6),
-    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": ("USDC", 6),
-    "0x6b175474e89094c44da98b954eedeac495271d0f": ("DAI", 18),
-    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": ("WETH", 18),
-    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": ("WBTC", 8),
-    "0x514910771af9ca656af840dff83e8264ecf986ca": ("LINK", 18),
-    "0x4fabb145d64652a948d72533023f6e7a623c7c53": ("BUSD", 18),
-    "0x853d955acef822db058eb8505911ed77f175b99e": ("FRAX", 18),
+# Contract → (symbol, decimals) per chain. USDT/USDC are not the same
+# contract on Polygon as they are on Ethereum; a single Ethereum map made
+# every other chain's treasury look empty aside from native gas.
+KNOWN_TOKENS: dict[str, dict[str, tuple[str, int]]] = {
+    "ethereum": {
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": ("USDT", 6),
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": ("USDC", 6),
+        "0x6b175474e89094c44da98b954eedeac495271d0f": ("DAI", 18),
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": ("WETH", 18),
+        "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": ("WBTC", 8),
+        "0x514910771af9ca656af840dff83e8264ecf986ca": ("LINK", 18),
+        "0x4fabb145d64652a948d72533023f6e7a623c7c53": ("BUSD", 18),
+        "0x853d955acef822db058eb8505911ed77f175b99e": ("FRAX", 18),
+    },
+    "base": {
+        "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2": ("USDT", 6),
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": ("USDC", 6),
+        "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": ("DAI", 18),
+        "0x4200000000000000000000000000000000000006": ("WETH", 18),
+    },
+    "polygon": {
+        "0xc2132d05d31c914a87c6611c10748aeb04b58e8f": ("USDT", 6),
+        "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": ("USDC", 6),
+        "0x2791bca1f2de4661ed88a30c99a7a9449aa84174": ("USDC", 6),
+        "0x8f3cf7ad23cd3cadbd9735aff958023239c6a063": ("DAI", 18),
+        "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619": ("WETH", 18),
+        "0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6": ("WBTC", 8),
+    },
+    "arbitrum": {
+        "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": ("USDT", 6),
+        "0xaf88d065e77c8cc2239327c5edb3a432268e5831": ("USDC", 6),
+        "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8": ("USDC", 6),
+        "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": ("DAI", 18),
+        "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": ("WETH", 18),
+        "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f": ("WBTC", 8),
+    },
+    "optimism": {
+        "0x94b008aa00579c1307b0ef2c499ad98a8ce58e58": ("USDT", 6),
+        "0x0b2c639c533813f4aa9d7837caf62653d097ff85": ("USDC", 6),
+        "0x7f5c764cbc14f9669b88837ca1490cca17c31607": ("USDC", 6),
+        "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": ("DAI", 18),
+        "0x4200000000000000000000000000000000000006": ("WETH", 18),
+    },
+    "bsc": {
+        "0x55d398326f99059ff775485246999027b3197955": ("USDT", 18),
+        "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d": ("USDC", 18),
+        "0xe9e7cea3dedca5984780bafc599bd69add087d56": ("BUSD", 18),
+        "0x2170ed0880ac9a755fd29b2688956bd959f933f8": ("ETH", 18),
+        "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c": ("WBNB", 18),
+    },
+    "avalanche": {
+        "0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7": ("USDT", 6),
+        "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e": ("USDC", 6),
+        "0xa7d7079b0fead91f3e65f86e8915cb59c1a4c664": ("USDC", 6),
+        "0xd586e7f844cea2f87f50152665bcbc2c279d8d70": ("DAI", 18),
+        "0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab": ("WETH", 18),
+        "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7": ("WAVAX", 18),
+    },
 }
+
+
+def known_tokens_for(chain: str) -> dict[str, tuple[str, int]]:
+    return KNOWN_TOKENS.get(chain, {})
 
 
 async def token_balances(address: str, chain: str) -> tuple[list[TokenBalance], str]:
@@ -483,19 +619,21 @@ async def token_balances(address: str, chain: str) -> tuple[list[TokenBalance], 
     Native balance alone badly understates a casino treasury — operators hold
     most reserves in stablecoins. Returns (balances, data_source).
     """
+    if not is_evm_chain(chain):
+        return [], "unsupported_chain"
     if not settings.live_data_available:
         if settings.strict_mode:
             return [], "unavailable"
         rng = random.Random(stable_seed(address.lower(), chain, "tokens"))
         demo = []
-        for contract, (sym, dec) in list(KNOWN_TOKENS.items())[:3]:
+        for contract, (sym, dec) in list(known_tokens_for(chain).items())[:3]:
             amt = rng.uniform(10_000, 5_000_000)
             demo.append(
                 TokenBalance(contract, sym, dec, int(amt * 10**dec), round(amt, 6))
             )
         return demo, "demo"
 
-    if _circuit_open():
+    if _circuit_open(chain):
         return [], "unavailable"
 
     url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
@@ -506,10 +644,10 @@ async def token_balances(address: str, chain: str) -> tuple[list[TokenBalance], 
                     client, url, "alchemy_getTokenBalances", [address, "erc20"]
                 )
     except Exception:  # noqa: BLE001
-        _record_upstream_result(ok=False)
+        _record_upstream_result(ok=False, chain=chain)
         return [], "unavailable"
 
-    _record_upstream_result(ok=True)
+    _record_upstream_result(ok=True, chain=chain)
     out: list[TokenBalance] = []
     for entry in (result or {}).get("tokenBalances", []):
         raw_hex = entry.get("tokenBalance") or "0x0"
@@ -520,7 +658,7 @@ async def token_balances(address: str, chain: str) -> tuple[list[TokenBalance], 
         if raw <= 0:
             continue
         contract = (entry.get("contractAddress") or "").lower()
-        meta = KNOWN_TOKENS.get(contract)
+        meta = known_tokens_for(chain).get(contract)
         if not meta:
             continue  # unknown token — excluded rather than valued at a guess
         symbol, decimals = meta
@@ -535,3 +673,114 @@ async def token_balances(address: str, chain: str) -> tuple[list[TokenBalance], 
         )
     out.sort(key=lambda b: -b.amount)
     return out, "live"
+
+
+# ── Lightweight activity probe ───────────────────────────────────────────────
+
+
+@dataclass
+class ActivityProbe:
+    """Cheap liveness check for an address: does it transact, and when last?"""
+
+    address: str
+    chain: str
+    has_history: bool
+    last_activity: datetime | None
+    sampled_transfers: int
+    data_source: str
+
+
+async def probe_activity(address: str, chain: str) -> ActivityProbe:
+    """One page per direction, no pagination.
+
+    Health checking only needs to know IF an address has ever transacted and
+    WHEN it last did. Answering that with the full paged history costs ~20
+    upstream calls per address, which collapses under concurrency — running it
+    across a registry timed every request out and reported healthy wallets as
+    unavailable. A single most-recent page answers both questions.
+    """
+    address = address.lower()
+
+    if not is_evm_chain(chain):
+        # Non-EVM entries live in the registry as public identity, not for
+        # health probing. Report a distinct source so the caller can label
+        # them "not_probeable" rather than "dead" or "quiet".
+        return ActivityProbe(address, chain, False, None, 0, "unsupported_chain")
+
+    if not settings.live_data_available:
+        if settings.strict_mode:
+            return ActivityProbe(address, chain, False, None, 0, "unavailable")
+        rng = random.Random(stable_seed(address, chain, "probe"))
+        has = rng.random() > 0.2
+        return ActivityProbe(
+            address, chain, has,
+            datetime.now(timezone.utc) - timedelta(hours=rng.randint(1, 400)) if has else None,
+            rng.randint(1, 100) if has else 0,
+            "demo",
+        )
+
+    if _circuit_open(chain):
+        return ActivityProbe(address, chain, False, None, 0, "unavailable")
+
+    url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
+
+    async def one(direction: str) -> list[dict]:
+        key = "toAddress" if direction == "in" else "fromAddress"
+        body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "alchemy_getAssetTransfers",
+            "params": [
+                {
+                    key: address,
+                    "category": ["external", "erc20"],
+                    "fromBlock": "0x0",
+                    "withMetadata": True,
+                    "excludeZeroValue": True,
+                    "order": "desc",
+                    "maxCount": "0x64",  # 100 — one page is enough
+                }
+            ],
+        }
+        r = await client.post(url, json=body)
+        r.raise_for_status()
+        payload = r.json()
+        if "error" in payload:
+            raise httpx.HTTPError(str(payload["error"]))
+        return (payload.get("result") or {}).get("transfers", [])
+
+    try:
+        for attempt in range(3):
+            try:
+                async with _upstream_sem:
+                    async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                        inbound, outbound = await asyncio.gather(one("in"), one("out"))
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(0.25 * (attempt + 1))
+    except Exception:  # noqa: BLE001
+        _record_upstream_result(ok=False, chain=chain)
+        return ActivityProbe(address, chain, False, None, 0, "unavailable")
+
+    _record_upstream_result(ok=True, chain=chain)
+    rows = inbound + outbound
+    stamps: list[datetime] = []
+    for row in rows:
+        raw = (row.get("metadata") or {}).get("blockTimestamp")
+        if not raw:
+            continue
+        try:
+            stamps.append(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+        except ValueError:
+            continue
+
+    return ActivityProbe(
+        address=address,
+        chain=chain,
+        has_history=bool(rows),
+        last_activity=max(stamps) if stamps else None,
+        sampled_transfers=len(rows),
+        data_source="live",
+    )

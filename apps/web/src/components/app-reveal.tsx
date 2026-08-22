@@ -2,7 +2,6 @@
 
 import { useEffect, type ReactNode } from "react";
 
-const LOAD_DURATION_MS = 1600;
 const FADE_DURATION_MS = 380;
 
 function setProgress(value: number) {
@@ -23,9 +22,8 @@ function dismissBoot() {
 }
 
 /**
- * Plays the first-paint boot overlay on every full page load, then reveals
- * the app. The overlay itself lives in the server layout so the DL logo is
- * in the initial HTML and cannot be skipped or flashed past.
+ * Reveals the app after hydration. The overlay is only a first-paint fallback;
+ * it must never sit above an interactive route while data is loading.
  */
 export function AppReveal({ children }: { children: ReactNode }) {
   useEffect(() => {
@@ -36,9 +34,6 @@ export function AppReveal({ children }: { children: ReactNode }) {
     }
 
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const duration = reduceMotion ? 180 : LOAD_DURATION_MS;
-    const startedAt = performance.now();
-    let frame = 0;
     let fadeTimer = 0;
     let finished = false;
 
@@ -49,23 +44,10 @@ export function AppReveal({ children }: { children: ReactNode }) {
       fadeTimer = window.setTimeout(dismissBoot, reduceMotion ? 20 : FADE_DURATION_MS);
     };
 
-    const tick = (now: number) => {
-      const ratio = Math.min((now - startedAt) / duration, 1);
-      setProgress(Math.round((1 - Math.pow(1 - ratio, 3)) * 100));
-      if (ratio < 1) {
-        frame = requestAnimationFrame(tick);
-        return;
-      }
-      finish();
-    };
-
-    frame = requestAnimationFrame(tick);
-    const failsafe = window.setTimeout(finish, duration + 1200);
+    finish();
 
     return () => {
-      cancelAnimationFrame(frame);
       window.clearTimeout(fadeTimer);
-      window.clearTimeout(failsafe);
     };
   }, []);
 

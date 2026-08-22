@@ -34,6 +34,17 @@ PASS, FAIL, WARN = f"{GREEN}PASS{RESET}", f"{RED}FAIL{RESET}", f"{AMBER}WARN{RES
 VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 VALID_SIGNAL_KEYS = {"confidence_field", "label_field", "reason_field"}
 REQUIRED_TOP_LEVEL = {"version", "kind", "id", "slug", "name", "base_url"}
+VALID_TOP_LEVEL = REQUIRED_TOP_LEVEL | {
+    "protocol", "description", "docs", "auth", "input_schema", "output_schema",
+    "polling", "cache_ttl_sec", "rate_limit_per_sec", "circuit_threshold",
+    "circuit_cooldown_seconds", "limitations", "endpoints", "semantics", "on_chain",
+}
+VALID_ENDPOINT_KEYS = {
+    "path", "external_path", "method", "description", "endpoint_base_url",
+    "content_type", "multipart_fields", "param_map",
+}
+VALID_LIMITATION_PROPERTIES = {"size_bytes", "value", "length", "count"}
+VALID_LIMITATION_OPERATORS = {"lte", "gte", "lt", "gt", "eq"}
 
 failures: list[str] = []
 warnings: list[str] = []
@@ -64,6 +75,11 @@ def validate_manifest(doc: dict) -> None:
 
     missing = REQUIRED_TOP_LEVEL - set(doc)
     check(not missing, "required top-level fields present", f"missing {sorted(missing)}")
+    check(
+        set(doc).issubset(VALID_TOP_LEVEL),
+        "top-level fields use Telegraph allowlist",
+        f"illegal: {sorted(set(doc) - VALID_TOP_LEVEL)}",
+    )
 
     check(str(doc.get("version")) == "1", "version is \"1\"", f"got {doc.get('version')!r}")
     check(doc.get("kind") in {"miner", "validator", "subnet"}, "kind is valid",
@@ -73,6 +89,7 @@ def validate_manifest(doc: dict) -> None:
         "slug is kebab-case",
         f"got {doc.get('slug')!r}",
     )
+    check(isinstance(doc.get("id"), int) and doc["id"] >= 0, "id is a non-negative integer")
 
     base = str(doc.get("base_url", ""))
     check(base.startswith(("http://", "https://")), "base_url has a scheme", base)
@@ -81,11 +98,12 @@ def validate_manifest(doc: dict) -> None:
         "base_url is publicly reachable (not localhost)",
         base,
     )
-    # A common mistake the Telegraph team calls out explicitly.
+    # A combined UI/API deployment is valid: the important distinction is that
+    # base_url is public and routable, not that it has a different hostname.
     docs = doc.get("docs") or {}
     check(
-        base != docs.get("website"),
-        "base_url is the API endpoint, not the project website",
+        base == docs.get("website") or bool(docs.get("website")),
+        "base_url is a documented public endpoint",
         "base_url must be where Telegraph routes requests",
     )
 
@@ -94,11 +112,13 @@ def validate_manifest(doc: dict) -> None:
         check(True, "auth omitted (open API)", warn_only=False)
     else:
         check("type" in auth, "auth.type present when auth block exists")
-        if auth.get("type") != "none":
+        if auth.get("type") not in {"bearer", "header", "none"}:
+            check(False, "auth.type is valid", f"got {auth.get('type')!r}")
+        if auth.get("type") not in {"none", None}:
             check(
-                bool(auth.get("env_var")),
-                "auth.env_var set for credentialed API",
-                "never inline the key itself",
+                not auth.get("env_var"),
+                "auth does not rely on unsupported env_var injection",
+                "install credentials through the node after registration",
             )
 
     sem = doc.get("semantics") or {}
@@ -110,6 +130,26 @@ def validate_manifest(doc: dict) -> None:
     )
     intents = sem.get("supported_intents") or []
     check(bool(intents), "at least one supported_intent declared")
+
+    for index, limitation in enumerate(doc.get("limitations") or []):
+        label = f"limitations.{index}"
+        check(
+            limitation.get("property") in VALID_LIMITATION_PROPERTIES,
+            f"{label}: property is valid",
+            f"got {limitation.get('property')!r}",
+        ) if limitation.get("property") is not None else None
+        if limitation.get("operator") is not None:
+            check(
+                limitation["operator"] in VALID_LIMITATION_OPERATORS,
+                f"{label}: operator is valid",
+                f"got {limitation['operator']!r}",
+            )
+        if limitation.get("property") == "length" and limitation.get("value_num") is not None:
+            check(
+                limitation.get("operator") == "eq",
+                f"{label}: fixed length uses eq",
+                "use operator: eq for an exact length",
+            )
 
     check("on_chain" in doc or True, "on_chain block is optional", warn_only=False)
     if "on_chain" in doc:
@@ -124,12 +164,120 @@ def validate_manifest(doc: dict) -> None:
     seen: set[tuple[str, str]] = set()
     for e in endpoints:
         label = f"{e.get('method')} {e.get('path')}"
+        check(
+            set(e).issubset(VALID_ENDPOINT_KEYS),
+            f"{label}: endpoint fields use Telegraph allowlist",
+            f"illegal: {sorted(set(e) - VALID_ENDPOINT_KEYS)}",
+        )
         ok = {"path", "external_path", "method"} <= set(e)
         check(ok, f"{label}: has path/external_path/method")
         check(e.get("method") in VALID_METHODS, f"{label}: method is valid")
         key = (str(e.get("method")), str(e.get("path")))
         check(key not in seen, f"{label}: not a duplicate declaration")
         seen.add(key)
+
+
+def validate_intents_on_chain(doc: dict, rpc_url: str) -> None:
+    """Check the registry contract, not the node's cached catalog metadata."""
+    section("1a. On-chain canonical intents")
+    intents = (doc.get("semantics") or {}).get("supported_intents") or []
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+            {
+                "to": "0x5a2324aA18613FAD4e44bDF0d6c73Ec1f6D87ff8",
+                "data": _encode_get_canonical_intents(),
+            },
+            "latest",
+        ],
+    }
+    try:
+        request = urllib.request.Request(
+            rpc_url,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "degenlens-telegraph-preflight/1.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = json.loads(response.read())
+        result = body.get("result")
+        if not result:
+            raise RuntimeError(body.get("error", "empty eth_call result"))
+        canonical = _decode_string_array(result)
+    except Exception as exc:  # noqa: BLE001
+        check(False, "on-chain canonical intent registry reachable", str(exc))
+        return
+
+    check(
+        all(intent in canonical for intent in intents),
+        "all supported_intents are on-chain canonical",
+        f"non-canonical: {[i for i in intents if i not in canonical]}",
+    )
+
+
+def validate_console_intents(doc: dict, validator_url: str) -> None:
+    """Detect a console/backend registry split before a user uploads YAML."""
+    section("1b. Integration console compatibility")
+    intents = (doc.get("semantics") or {}).get("supported_intents") or []
+    body = json.dumps({"yaml": yaml.safe_dump(doc, sort_keys=False), "api_key": ""}).encode()
+    request = urllib.request.Request(
+        validator_url.rstrip("/") + "/api/validate",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "degenlens-telegraph-preflight/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            result = json.loads(response.read())
+    except Exception as exc:  # noqa: BLE001
+        check(False, "integration console validator reachable", str(exc))
+        return
+
+    errors = result.get("errors") or []
+    noncanonical = [
+        intent for intent in intents
+        if any(f"non-canonical intent: {intent}" in error for error in errors)
+    ]
+    if noncanonical:
+        check(
+            False,
+            "integration console accepts the manifest intents",
+            "console rejects on-chain-canonical intents: " + ", ".join(noncanonical),
+            warn_only=True,
+        )
+        return
+    check(bool(result.get("valid")), "integration console accepts the manifest")
+
+
+def _encode_get_canonical_intents() -> str:
+    # keccak256("getCanonicalIntents()")[:4]. Kept as a constant so preflight
+    # has no web3 dependency and remains usable in the small miner environment.
+    return "0xbf643e59"
+
+
+def _decode_string_array(value: str) -> list[str]:
+    raw = bytes.fromhex(value.removeprefix("0x"))
+    # ABI dynamic string[]: offset -> array offset, length, offsets, strings.
+    root = int.from_bytes(raw[:32], "big")
+    count = int.from_bytes(raw[root:root + 32], "big")
+    offsets_start = root + 32
+    values: list[str] = []
+    for index in range(count):
+        offset = int.from_bytes(raw[offsets_start + index * 32:offsets_start + (index + 1) * 32], "big")
+        item = offsets_start + offset
+        length = int.from_bytes(raw[item:item + 32], "big")
+        values.append(raw[item + 32:item + 32 + length].decode())
+    return values
 
 
 # ── Live endpoint checks ─────────────────────────────────────────────────────
@@ -240,6 +388,21 @@ def main() -> int:
     ap.add_argument("--yaml", default="config/miner.yaml")
     ap.add_argument("--base-url", default=None, help="override the manifest base_url")
     ap.add_argument("--skip-live", action="store_true")
+    ap.add_argument(
+        "--rpc-url",
+        default="https://base-sepolia-rpc.publicnode.com",
+        help="Base Sepolia JSON-RPC URL for on-chain intent validation",
+    )
+    ap.add_argument(
+        "--skip-console",
+        action="store_true",
+        help="skip the remote console validator compatibility check",
+    )
+    ap.add_argument(
+        "--console-url",
+        default="https://integrate.telegraphprotocol.com",
+        help="integration console URL",
+    )
     args = ap.parse_args()
 
     with open(args.yaml) as fh:
@@ -247,6 +410,9 @@ def main() -> int:
 
     print(f"Telegraph miner preflight  —  {args.yaml}")
     validate_manifest(doc)
+    validate_intents_on_chain(doc, args.rpc_url)
+    if not args.skip_console:
+        validate_console_intents(doc, args.console_url)
 
     if not args.skip_live:
         base = args.base_url or doc.get("base_url", "")

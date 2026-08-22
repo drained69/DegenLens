@@ -10,11 +10,25 @@ from __future__ import annotations
 
 import asyncio
 import statistics
+import time
 from dataclasses import dataclass, field
 
-from .onchain import Transfer, TransferSet, get_transfers, native_balance
+from collections import defaultdict
+
+from .onchain import (
+    Transfer,
+    TransferSet,
+    get_observation_transfers,
+    get_transfers,
+    merge_cluster_reads,
+    native_balance,
+)
+from .intelligence import DataState, Evidence, aggregate_flows
 from .prices import resolve_prices
-from .wallets import CASINOS, Casino, all_casinos, get_casino
+from .settings import settings
+from .wallets import CASINOS, Casino, all_casinos, get_casino, observation_targets
+
+_STATS_CACHE: dict[tuple[str, int], tuple[CasinoStats, float]] = {}
 
 
 def _merge_source(sources: list[str]) -> str:
@@ -41,64 +55,141 @@ class CasinoStats:
     data_source: str
     wallet_count: int
     chains: list[str] = field(default_factory=list)
+    chains_claimed: list[str] = field(default_factory=list)
+    chains_queried: list[str] = field(default_factory=list)
+    by_chain: list[dict] = field(default_factory=list)
     # False when a lookback window could not be fully paged upstream. Totals are
     # then lower bounds on observed flow, not complete measurements.
     coverage_complete: bool = True
+    coverage: float = 0.0
+    evidence: dict = field(default_factory=dict)
+    observed_inflow: float = 0.0
+    observed_outflow: float = 0.0
+    internal_transfers_usd: float = 0.0
+    unknown_flow_usd: float = 0.0
+    unique_withdrawers: int = 0
+    duplicate_count: int = 0
 
     @property
     def observed_inbound_usd(self) -> float:
-        return self.deposits_usd
+        return self.observed_inflow
 
     @property
     def observed_outbound_usd(self) -> float:
-        return self.withdrawals_usd
+        return self.observed_outflow
 
 
-async def _aggregate_casino(casino: Casino, hours: int) -> CasinoStats:
-    # Fetch every wallet's transfers concurrently rather than serially.
+async def _aggregate_casino(
+    casino: Casino, hours: int, *, include_transaction_evidence: bool = True
+) -> CasinoStats:
+    # Fetch every identity claim on every indexed EVM chain, concurrently.
+    # Querying only the seed chain dropped Polygon/Base/BSC/... activity for
+    # operators that reuse the same hot wallet across networks.
+    targets = observation_targets(casino)
+    seed_pairs = {(w.address.lower(), w.chain) for w in casino.wallets}
     sets: list[TransferSet] = await asyncio.gather(
-        *(get_transfers(w.address, w.chain, hours) for w in casino.wallets)
-    )
+        *(
+            get_observation_transfers(
+                w.address,
+                w.chain,
+                hours,
+                seed=(w.address.lower(), w.chain) in seed_pairs,
+            )
+            for w in targets
+        )
+    ) if targets else []
 
     # Resolve every distinct token symbol in ONE upstream call.
     symbols = {t.token_symbol for s in sets for t in s.transfers}
     prices = await resolve_prices(symbols)
 
-    deposits_usd = 0.0
-    withdrawals_usd = 0.0
-    unique_depositors: set[str] = set()
-    tx_count = 0
+    all_transfers: list[Transfer] = []
+    casino_addresses = {w.address.lower() for w in casino.wallets}
+    by_chain_acc: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"inbound_usd": 0.0, "outbound_usd": 0.0, "transfers": 0}
+    )
+    chain_sources: dict[str, str] = {}
+    chain_complete: dict[str, bool] = {}
 
-    for wallet, tset in zip(casino.wallets, sets):
+    for wallet, tset in zip(targets, sets):
         addr = wallet.address.lower()
-        tx_count += len(tset.transfers)
+        # Keep chain-level provenance separate from aggregate provenance. A
+        # failed optional network must not be represented as observed zero.
+        chain_sources[wallet.chain] = tset.data_source
+        chain_complete[wallet.chain] = tset.complete
+        all_transfers.extend(tset.transfers)
         for t in tset.transfers:
             price = prices.get(t.token_symbol, 0.0)
             if price <= 0:
                 continue  # unknown asset — excluded rather than guessed
             usd = t.amount * price
+            bucket = by_chain_acc[t.chain]
+            # Chain-level observed totals remain directional facts. The flow
+            # aggregate below applies cluster classification and deduplication.
             if t.to_addr == addr:
-                deposits_usd += usd
-                unique_depositors.add(t.from_addr)
+                bucket["inbound_usd"] += usd
             elif t.from_addr == addr:
-                withdrawals_usd += usd
+                bucket["outbound_usd"] += usd
+            bucket["transfers"] += 1
+
+    source, coverage_complete = merge_cluster_reads(sets)
+    flow = aggregate_flows(
+        all_transfers,
+        prices,
+        casino_addresses,
+        coverage=sum(1 for s in sets if s.data_source != "unavailable") / max(len(sets), 1),
+        source=source,
+    )
+    deposits_usd = flow.attributed_customer_inflow_usd
+    withdrawals_usd = flow.attributed_customer_outflow_usd
+    unique_depositors = {r.transfer.from_address for r in flow.classifications if r.classification.value == "CUSTOMER_DEPOSIT"}
+    tx_count = flow.transaction_count
 
     confidence = (
         sum(w.confidence for w in casino.wallets) / len(casino.wallets)
         if casino.wallets
         else 0.0
     )
-    source = _merge_source([s.data_source for s in sets])
-    coverage_complete = all(s.complete for s in sets)
     # Provenance discounts confidence — synthetic data is never high-confidence.
-    if source == "demo":
+    if source == "unavailable":
+        confidence = 0.0
+    elif source == "demo":
         confidence *= 0.5
     # A truncated window yields a lower bound, not a measurement. Say so in the
     # confidence rather than presenting a partial total at full confidence.
-    if not coverage_complete:
+    if source != "unavailable" and not coverage_complete:
         confidence *= 0.6
-    elif source == "unavailable":
-        confidence = 0.0
+
+    total_in = sum(b["inbound_usd"] for b in by_chain_acc.values()) or 1.0
+    by_chain = sorted(
+        (
+            {
+                "chain": chain,
+                "inbound_usd": round(b["inbound_usd"], 2),
+                "outbound_usd": round(b["outbound_usd"], 2),
+                "net_usd": round(b["inbound_usd"] - b["outbound_usd"], 2),
+                "transfers": int(b["transfers"]),
+                "share_of_observed_inbound_pct": round(
+                    b["inbound_usd"] / total_in * 100, 2
+                ),
+                "data_source": chain_sources.get(chain, "unavailable"),
+                "coverage_complete": chain_complete.get(chain, False),
+                "status": (
+                    "not_registered"
+                    if chain not in casino.queried_chains
+                    else
+                    "unavailable"
+                    if chain_sources.get(chain) == "unavailable"
+                    else "observed"
+                    if b["transfers"]
+                    else "queried_zero"
+                ),
+            }
+            for chain in casino.queried_chains
+            for b in [by_chain_acc[chain]]
+        ),
+        key=lambda row: -row["inbound_usd"],
+    )
 
     rounded_inbound = round(deposits_usd, 2)
     rounded_outbound = round(withdrawals_usd, 2)
@@ -114,8 +205,33 @@ async def _aggregate_casino(casino: Casino, hours: int) -> CasinoStats:
         confidence=round(confidence, 3),
         data_source=source,
         wallet_count=len(casino.wallets),
-        chains=sorted({w.chain for w in casino.wallets}),
+        chains=[row["chain"] for row in by_chain if row["transfers"]],
+        chains_claimed=casino.chains,
+        chains_queried=casino.queried_chains,
+        by_chain=by_chain,
         coverage_complete=coverage_complete,
+        coverage=round(flow.coverage, 3),
+        observed_inflow=round(flow.observed_inflow_usd, 2),
+        observed_outflow=round(flow.observed_outflow_usd, 2),
+        internal_transfers_usd=round(flow.internal_transfers_usd, 2),
+        unknown_flow_usd=round(flow.unknown_flow_usd, 2),
+        unique_withdrawers=flow.unique_withdrawers,
+        duplicate_count=flow.duplicate_count,
+        evidence=Evidence(
+            claim=f"{casino.name} attributed customer flow over {hours} hours",
+            classification=DataState.CALCULATED,
+            sources=tuple(sorted({s.data_source for s in sets})),
+            transactions=(
+                tuple(r.transfer.tx_hash for r in flow.classifications)
+                if include_transaction_evidence
+                else ()
+            ),
+            wallets=tuple(sorted(casino_addresses)),
+            methodology="Sum deduplicated transfers classified against the registered casino wallet cluster; internal cluster transfers excluded from customer flow.",
+            confidence=round(confidence, 3),
+            coverage=round(flow.coverage, 3),
+            timestamp=max((t.timestamp.isoformat() for t in all_transfers), default=""),
+        ).as_dict(),
     )
 
 
@@ -123,15 +239,51 @@ async def casino_stats(slug: str, hours: int = 24) -> CasinoStats | None:
     casino = get_casino(slug)
     if not casino:
         return None
-    return await _aggregate_casino(casino, hours)
+    stats = await _aggregate_casino(
+        casino, hours, include_transaction_evidence=False
+    )
+    _STATS_CACHE[(casino.slug, hours)] = (
+        stats, time.monotonic() + settings.stats_ttl
+    )
+    return stats
+
+
+def cached_casino_stats(slug: str, hours: int) -> CasinoStats | None:
+    cached = _STATS_CACHE.get((slug.lower(), hours))
+    if not cached or cached[1] <= time.monotonic():
+        return None
+    return cached[0]
 
 
 async def rank_casinos(hours: int = 168) -> tuple[list[dict], str]:
     """Ranked casinos plus merged provenance."""
-    stats = await asyncio.gather(*(_aggregate_casino(c, hours) for c in all_casinos()))
-    # Deterministic ordering: volume desc, then slug asc to break ties stably.
-    ordered = sorted(stats, key=lambda s: (-s.deposits_usd, s.slug))
-    total = sum(s.deposits_usd for s in ordered) or 1.0
+    now = time.monotonic()
+    if settings.live_data_available:
+        operators = all_casinos()
+        cached = {
+            casino.slug: entry[0]
+            for casino in operators
+            if (entry := _STATS_CACHE.get((casino.slug, hours))) and entry[1] > now
+        }
+        missing = [casino for casino in operators if casino.slug not in cached]
+        refreshed = await asyncio.gather(*(
+            casino_stats(casino.slug, hours) for casino in missing
+        ))
+        stats = [*cached.values(), *(row for row in refreshed if row is not None)]
+    else:
+        stats = await asyncio.gather(*(
+            _aggregate_casino(casino, hours, include_transaction_evidence=False)
+            for casino in all_casinos()
+        ))
+    unavailable = [casino for casino in all_casinos() if not any(s.slug == casino.slug for s in stats)]
+    # Unavailable reads are unknown, not zero. Keep them after measured rows so
+    # a provider failure cannot silently rank an operator by a fabricated zero.
+    ordered = sorted(
+        stats,
+        key=lambda s: (s.data_source == "unavailable", -s.deposits_usd, s.slug),
+    )
+    measured = [s for s in ordered if s.data_source != "unavailable"]
+    total = sum(s.deposits_usd for s in measured) or 1.0
     rows = [
         {
             "rank": i + 1,
@@ -140,15 +292,43 @@ async def rank_casinos(hours: int = 168) -> tuple[list[dict], str]:
             "deposits_usd": s.deposits_usd,
             "withdrawals_usd": s.withdrawals_usd,
             "net_flow_usd": s.net_flow_usd,
-            "tracked_flow_share_pct": round(s.deposits_usd / total * 100, 2),
-            "market_share_pct": round(s.deposits_usd / total * 100, 2),
+            "tracked_flow_share_pct": (
+                round(s.deposits_usd / total * 100, 2)
+                if s.data_source != "unavailable"
+                else 0.0
+            ),
+            "market_share_pct": (
+                round(s.deposits_usd / total * 100, 2)
+                if s.data_source != "unavailable"
+                else 0.0
+            ),
             "unique_depositors": s.unique_depositors,
             "transaction_count": s.transaction_count,
             "confidence": s.confidence,
+            "data_source": s.data_source,
+            "coverage_complete": s.coverage_complete,
         }
         for i, s in enumerate(ordered)
     ]
-    return rows, _merge_source([s.data_source for s in ordered])
+    rows.extend(
+        {
+            "rank": len(rows) + 1,
+            "slug": casino.slug,
+            "name": casino.name,
+            "deposits_usd": 0.0,
+            "withdrawals_usd": 0.0,
+            "net_flow_usd": 0.0,
+            "tracked_flow_share_pct": 0.0,
+            "market_share_pct": 0.0,
+            "unique_depositors": 0,
+            "transaction_count": 0,
+            "confidence": 0.0,
+            "data_source": "unavailable",
+            "coverage_complete": False,
+        }
+        for i, casino in enumerate(unavailable)
+    )
+    return rows, _merge_source([s.data_source for s in ordered]) if ordered else "unavailable"
 
 
 # ── Fraud detection ──────────────────────────────────────────────────────────

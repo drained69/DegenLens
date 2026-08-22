@@ -206,10 +206,10 @@ pnpm --filter web dev
 
 ## Registering on Telegraph
 
-1. Deploy the miner to a public HTTPS URL. **Already live on Railway:**
+1. Deploy the combined DegenLens website and miner to a public HTTPS URL. **Already live on Railway:**
 
    ```
-   https://degenminer-production.up.railway.app
+   https://degenlensv1.up.railway.app
    ```
 
    To redeploy after changes:

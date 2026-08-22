@@ -1,22 +1,59 @@
 version: "1"
 kind: miner
-id: 0                       # assigned at registration
+id: 10002                   # assigned for DegenMiner; must remain unique
 slug: degenlens-onchain
 protocol: generic
-name: DegenLens On-Chain Gambling Intelligence
+name: DegenMiner Evidence-Backed On-Chain Gambling Intelligence
 description: >
-  Evidence-backed intelligence for observable on-chain gambling activity.
-  DegenMiner looks up transactions, measures directional flow around attributed
-  operator wallets, maps wallet relationships, and surfaces explainable anomaly
-  signals. Every
-  answer includes a verdict, confidence, reasoning, and data provenance so
-  consumers can distinguish observed chain state from degraded output.
+  DegenMiner is an evidence-first Telegraph Protocol intelligence miner for
+  agents, analysts, investigators, compliance teams, and automated workflows
+  that need structured information about observable on-chain activity connected
+  to crypto gambling operators. It queries supported EVM networks for canonical
+  transaction receipts, native balances, token and native-asset transfers,
+  timestamps, counterparties, contract inputs, gas data, and current wallet
+  holdings. These direct chain observations are joined to a versioned public
+  attribution registry in which every operator-wallet claim records its chain,
+  role, source, evidence status, review date, and confidence ceiling. The miner
+  then applies deterministic and reproducible calculations to produce bounded
+  intelligence about attributed operator inflows and outflows, net directional
+  flow, transfer counts, unique counterparties, network and asset composition,
+  large transfers, time-series activity, counterparty concentration, observable
+  treasury holdings, infrastructure-provider exposure, cross-operator wallet
+  overlap, player-candidate settlement patterns, attribution candidates, label
+  health, and explainable anomaly indicators. Its three canonical Telegraph
+  intents are ONCHAIN_TX_LOOKUP for verifiable transaction and attributed-flow
+  analysis, WALLET_BALANCE_CHECK for balances, holdings, wallet associations,
+  and observable settlement exposure, and FRAUD_DETECTION for deterministic
+  risk triage based on patterns such as round trips, unusual velocity, and
+  clustered behavior. Results are intended for investigation, monitoring, due
+  diligence, market research, attribution review, and risk prioritization; they
+  are not final legal, compliance, identity, credit, or enforcement decisions.
+  Every inference response exposes a normalized confidence score from 0 to 1, a
+  concise verdict, human-readable reasoning, data_source provenance, timestamps,
+  coverage status, and endpoint-specific caveats. Confidence expresses the
+  strength of support for the returned answer, not certainty about a person,
+  operator, wager, or offense. It is reduced when attribution is unverified,
+  pagination is incomplete, an upstream provider is unavailable, or a conclusion
+  is derived rather than directly observed. Live, registry, derived, unavailable,
+  and local-development demo data are explicitly distinguished; production is
+  configured to reject synthetic data. Multi-chain and multi-wallet reads are
+  bounded by declared lookback, pagination, concurrency, cache, circuit-breaker,
+  and request-deadline controls so failures return an honest low-confidence
+  unavailable result instead of fabricated values. DegenMiner never treats an
+  unattributed operator, unsupported chain, failed provider read, or incomplete
+  traversal as zero activity. It also does not claim access to private casino or
+  sportsbook ledgers, individual bets, game outcomes, account balances held
+  inside an operator, customer identity, beneficial ownership, operator revenue,
+  liabilities, profitability, solvency, or proof of criminal fraud. An inbound
+  or outbound transfer alone does not prove a deposit, withdrawal, wager, win,
+  loss, ownership relationship, source of funds, or user intent.
 
-# base_url is the PRODUCTION API ENDPOINT Telegraph routes requests to —
-# not the project website. The website/docs links live under `docs` below.
-base_url: https://degenminer-production.up.railway.app
+# The combined DegenLens deployment serves both the web UI and miner API.
+base_url: https://degenlensv1.up.railway.app
 
 docs:
+  website: https://degenlensv1.up.railway.app
+  documentation: https://degenlensv1.up.railway.app/docs
   repository: https://github.com/drained69/DegenLens
 
 # The API is publicly accessible and requires no credentials. Declaring
@@ -29,31 +66,25 @@ auth:
 # Declared honestly: the node enforces these, and overpromising causes timeouts
 # that count as failed answers.
 rate_limit_per_sec: 8
-cache_ttl_sec: 60
+cache_ttl_sec: 300
 circuit_threshold: 5
 circuit_cooldown_seconds: 30
-
-limitations:
-  - code: MAX_PARAM_VALUE
-    message: "Lookback window is capped at 720 hours (30 days)."
-    param: hours
-    property: value
-    value_num: 720
-    operator: lte
-  - code: MAX_PARAM_SIZE
-    message: "Address must be a 0x-prefixed 42-character hex string."
-    param: address
-    property: length
-    value_num: 42
-    operator: lte
 
 input_schema:
   type: object
   description: >
-    Request shape varies by endpoint. /transaction/lookup takes {tx_hash, chain};
-    /casino/stats takes {slug, hours};
-    /wallet/trace takes {address, chain}; /anomaly/check takes
-    {address, chain, hours}; /casino/ranking takes ?hours= as a query param.
+    Endpoint requests are intentionally small and deterministic. Transaction
+    lookup accepts a canonical EVM transaction hash and chain. Operator flow
+    endpoints accept a registry slug and lookback hours. Wallet, player, and
+    anomaly endpoints accept a 0x-prefixed EVM address, chain, and optional
+    lookback. Aggregate GET endpoints accept bounded query parameters. See each
+    endpoint description for its exact request shape and default window. The
+    live EVM index is ethereum, base, polygon, arbitrum, optimism, bsc, and
+    avalanche. The registry can also display public labels from non-EVM
+    networks, but the current RPC adapter reports those as non-probeable rather
+    than silently treating them as zero. Availability also depends on reviewed
+    wallet attribution, upstream RPC health, token pricing, pagination limits,
+    and the requested lookback window.
   properties:
     slug:
       type: string
@@ -66,7 +97,7 @@ input_schema:
       examples: ["0x974caa59e49682cda0ad2bbe82983419a2ecc400"]
     chain:
       type: string
-      enum: [ethereum, base, polygon, arbitrum]
+      enum: [ethereum, base, polygon, arbitrum, optimism, bsc, avalanche]
       default: ethereum
     hours:
       type: integer
@@ -87,7 +118,11 @@ output_schema:
       type: number
       minimum: 0
       maximum: 1
-      description: "Answer confidence. 0 when data is unavailable."
+      description: >
+        Confidence for the returned answer, not certainty about an operator,
+        person, wager, or criminal act. It is 0 when data is unavailable and
+        is capped when attribution is curated, coverage is partial, or the
+        result is derived from transfers rather than a direct chain fact.
     verdict:
       type: string
       description: >
@@ -100,6 +135,15 @@ output_schema:
       type: string
       enum: [live, demo, unavailable, registry, derived]
       description: "Provenance of the figures in this response."
+    coverage_complete:
+      type: boolean
+      description: >
+        Whether the requested traversal completed within the available chain
+        and pagination budget. False means reported totals are partial or lower
+        bounds, not that omitted activity did not occur.
+    caveat:
+      type: string
+      description: "Endpoint-specific limitation that consumers should preserve."
     deposits_usd:
       type: number
       description: "USD value of inbound transfers observed in the window."
@@ -142,17 +186,22 @@ endpoints:
     external_path: /transaction/lookup
     method: POST
     description: >
-      Canonical transaction lookup by chain and transaction hash. Returns status,
-      block, sender, recipient, native value, gas fields, and separate gambling
-      entity attribution claims with confidence and evidence status.
+      Canonical transaction lookup by chain and transaction hash. Returns direct
+      RPC facts including status, block, sender, recipient, native value, gas
+      fields, method input, and a separately labeled operator-attribution layer.
+      Use this endpoint when an agent needs the most verifiable answer in the
+      product. A missing registry match is returned as unattributed, not as proof
+      that the transaction has no gambling relationship.
       REQUEST: {"tx_hash": "0x...", "chain": "ethereum"}
 
   - path: /casino/stats
     external_path: /casino/stats
     method: POST
     description: >
-      Observed inbound and outbound transfer volume, unique inbound counterparty
-      count, and net flow around an attributed operator wallet set.
+      Measures observed inbound and outbound transfer volume, unique inbound
+      counterparties, transaction count, chains, and net directional flow around
+      a reviewed operator wallet cluster. This is a settlement-rail observation,
+      not a wager, revenue, deposit, withdrawal, or profit-and-loss feed.
       REQUEST: {"slug": "stake", "hours": 24}
       RESPONSE: {"slug": "stake", "deposits_usd": 2672237.51,
       "withdrawals_usd": 772038.14, "net_flow_usd": 1900199.37,
@@ -163,8 +212,10 @@ endpoints:
     external_path: /casino/ranking
     method: GET
     description: >
-      Tracked operators ranked by observed inbound USD flow, with tracked-flow
-      share and unique inbound counterparty counts.
+      Ranks only operators with attributed wallet coverage by observed inbound
+      USD transfer flow. Includes tracked-flow share, counterparties, outbound
+      flow, and confidence. Catalogued operators without reviewed attribution are
+      excluded from the ranking and remain visible through /casinos and /coverage.
       REQUEST: query param ?hours=168
       RESPONSE: {"window_hours": 168, "count": 2, "ranking": [{"rank": 1,
       "slug": "stake", "deposits_usd": 24567436.62, "market_share_pct": 66.53,
@@ -175,8 +226,10 @@ endpoints:
     external_path: /wallet/trace
     method: POST
     description: >
-      Native balance plus casino cluster attribution for an address — which
-      operators it has interacted with over 30 days and at what confidence.
+      Returns a wallet's direct native balance where available and its observed
+      interactions with attributed operator clusters over the supported window.
+      Attribution is a registry claim with evidence status; an address is not a
+      person and an interaction does not establish gambling intent.
       REQUEST: {"address": "0x974caa...c400", "chain": "ethereum"}
       RESPONSE: {"address": "0x974caa...c400", "chain": "ethereum",
       "balance_native": 5270.82, "labeled_casino": "stake",
@@ -188,9 +241,10 @@ endpoints:
     external_path: /anomaly/check
     method: POST
     description: >
-      Screen an address for wash-trading round-trips, transaction velocity
-      spikes above 3 sigma, and sybil deposit patterns. Returns a 0..1 score
-      with named evidence per matched signal.
+      Deterministically screens an address for observable patterns such as
+      round-trip transfers, unusual transaction velocity, and clustered or sybil-
+      like activity. Returns a prioritization score and named evidence for review;
+      it is not a fraud verdict, identity decision, or enforcement result.
       REQUEST: {"address": "0x974caa...c400", "chain": "ethereum", "hours": 24}
       RESPONSE: {"address": "0x974caa...c400", "verdict": "suspicious",
       "score": 0.45, "is_suspicious": true, "signals": ["wash-trade round-trip
@@ -201,7 +255,10 @@ endpoints:
     external_path: /casinos
     method: GET
     description: >
-      Catalog of tracked casinos and their wallet cluster coverage.
+      Public registry of catalogued gambling operators, reviewed wallet claims,
+      evidence status, supported chains, and explicit attributed versus unobserved
+      coverage. This is the discovery endpoint for understanding what other
+      flow endpoints can actually measure.
       REQUEST: no parameters
       RESPONSE: {"count": 2, "casinos": [{"slug": "stake", "name": "Stake.com",
       "licensed_in": "Curaçao", "wallet_count": 2, "chains": ["ethereum"]}]}
@@ -411,6 +468,34 @@ endpoints:
       "overlap_pct": 0.27, "operator_pairs": [{"operator_a": "stake",
       "operator_b": "rollbit", "shared_addresses": 8, "jaccard_pct": 0.19}],
       "confidence": 0.55, "data_source": "live"}
+
+  - path: /health/registry
+    external_path: /health/registry
+    method: GET
+    description: >
+      Health of every attributed operator's wallet claims. Distinguishes an
+      address that is genuinely quiet in the window from one that is dormant,
+      and from one that has NO transfer history at all — a wrong label rather
+      than an operator with no volume. Consumers should treat figures for
+      non-reportable operators as absent, not zero.
+      REQUEST: query param ?hours=168
+      RESPONSE: {"operators_attributed": 4, "operators_reportable": 2,
+      "by_attribution_status": {"healthy": 1, "partial": 1, "stale": 2},
+      "dead_labels": [], "operators": [...], "confidence": 0.9,
+      "verdict": "2/4_reportable", "data_source": "live"}
+
+  - path: /health/operator/{slug}
+    external_path: /health/operator/{slug}
+    method: GET
+    description: >
+      Wallet-claim health for one operator, per address: lifetime activity,
+      last-seen timestamp, and a status of active, quiet, dormant, or dead.
+      REQUEST: path slug, query param ?hours=168
+      RESPONSE: {"slug": "stake", "attribution_status": "partial",
+      "coverage_quality": "partial", "active_claims": 1, "total_claims": 1,
+      "reportable": true, "wallets": [{"address": "0x...", "status": "active",
+      "lifetime_transfers": 200, "days_since_activity": 0.01}],
+      "confidence": 0.9, "data_source": "live"}
 
 semantics:
   signal_mapping:

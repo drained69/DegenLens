@@ -4,8 +4,8 @@ import { telegraph } from '@/lib/telegraph';
 /**
  * Auto-routed ask through Telegraph.
  *
- * Without a funded x402 wallet the Telegraph call 402s, so we fall back to the
- * local DegenMiner so the flow is still demonstrable. Malformed input is
+ * Without a funded x402 wallet the Telegraph call 402s, so development falls
+ * back to the local DegenMiner. Malformed input is
  * answered with a structured 400 rather than being allowed to throw.
  */
 export async function POST(req: Request) {
@@ -43,7 +43,16 @@ export async function POST(req: Request) {
       routed_via: 'telegraph',
     });
   } catch (engineErr) {
-    // Fallback: answer from the local miner so the demo still works offline.
+    // Never turn a paid routing failure into an unrelated successful answer.
+    if (process.env.NODE_ENV !== 'development') {
+      return NextResponse.json(
+        { error: 'Telegraph routing failed.', detail: String(engineErr) },
+        { status: 502 },
+      );
+    }
+
+    // Development-only fallback keeps local demos usable without masking
+    // production payment, routing, or miner configuration failures.
     try {
       const r = await telegraph.askDirect<{
         reasoning: string;
@@ -52,8 +61,8 @@ export async function POST(req: Request) {
       return NextResponse.json({
         answer:
           `${r.result.reasoning}\n\n` +
-          `(Answered by the local miner. Configure EVM_PRIVATE_KEY and wrap fetch ` +
-          `with @x402/fetch to route through Telegraph for real.)`,
+          `(Answered by the local miner because Telegraph routing was unavailable. ` +
+          `Configure EVM_PRIVATE_KEY with Base Sepolia USDC to enable x402.)`,
         miner_id: 'local',
         miner_name: 'degenminer-local',
         intent: 'ONCHAIN_TX_LOOKUP',

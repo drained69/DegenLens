@@ -19,9 +19,15 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from .onchain import NATIVE_SYMBOL, Transfer, TransferSet, get_transfers
+from .onchain import (
+    NATIVE_SYMBOL,
+    Transfer,
+    TransferSet,
+    get_observation_transfers,
+    merge_cluster_reads,
+)
 from .prices import resolve_prices
-from .wallets import Casino, attributed_operators, catalog
+from .wallets import INDEXED_CHAINS, Casino, attributed_operators, catalog, observation_targets
 
 STABLE_SYMBOLS = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDP", "FRAX"}
 
@@ -48,28 +54,48 @@ class OperatorFlow:
 
 
 async def collect_flow(casino: Casino, hours: int) -> OperatorFlow:
-    """Fetch and price every transfer across an operator's clusters."""
+    """Fetch and price every transfer across an operator's clusters.
+
+    Each EVM identity claim is read on every indexed chain, not just the seed
+    network. That is how Stake and the other multi-chain casinos actually settle.
+    """
+    targets = observation_targets(casino)
+    seed_pairs = {(w.address.lower(), w.chain) for w in casino.wallets}
     sets: list[TransferSet] = await asyncio.gather(
-        *(get_transfers(w.address, w.chain, hours) for w in casino.wallets)
-    )
+        *(
+            get_observation_transfers(
+                w.address,
+                w.chain,
+                hours,
+                seed=(w.address.lower(), w.chain) in seed_pairs,
+            )
+            for w in targets
+        )
+    ) if targets else []
     transfers = [t for s in sets for t in s.transfers]
     prices = await resolve_prices({t.token_symbol for t in transfers})
-
-    sources = [s.data_source for s in sets]
-    source = (
-        "unavailable"
-        if "unavailable" in sources
-        else "demo"
-        if "demo" in sources
-        else "live"
-    )
+    source, complete = merge_cluster_reads(sets)
     return OperatorFlow(
         casino=casino,
         transfers=transfers,
         prices=prices,
         data_source=source,
-        complete=all(s.complete for s in sets),
+        complete=complete,
     )
+
+
+async def collect_flows(operators: list[Casino], hours: int) -> list[OperatorFlow]:
+    """Collect operator flows with a bounded number of cluster aggregates."""
+    # Operators are independent. Serializing them made market-wide endpoints
+    # scale linearly with the registry and routinely exceed the node timeout.
+    # The lower-level on-chain adapter still limits concurrent provider calls.
+    operator_flow_sem = asyncio.Semaphore(3)
+
+    async def collect(operator: Casino) -> OperatorFlow:
+        async with operator_flow_sem:
+            return await collect_flow(operator, hours)
+
+    return await asyncio.gather(*(collect(operator) for operator in operators))
 
 
 # ── Network distribution ─────────────────────────────────────────────────────
@@ -82,7 +108,7 @@ async def network_distribution(hours: int = 168) -> dict:
     the distribution across the chains we actually watch, not the whole market.
     """
     operators = attributed_operators()
-    flows = await asyncio.gather(*(collect_flow(c, hours) for c in operators))
+    flows = await collect_flows(operators, hours)
 
     by_chain: dict[str, dict[str, float]] = defaultdict(
         lambda: {"inbound_usd": 0.0, "outbound_usd": 0.0, "transfers": 0}
@@ -146,7 +172,7 @@ async def asset_mix(slug: str | None = None, hours: int = 168) -> dict:
     if not operators:
         return {"error": "no attributed operator matched", "assets": []}
 
-    flows = await asyncio.gather(*(collect_flow(c, hours) for c in operators))
+    flows = await collect_flows(operators, hours)
 
     by_token: dict[str, dict[str, float]] = defaultdict(
         lambda: {"inbound_usd": 0.0, "outbound_usd": 0.0, "transfers": 0}
@@ -261,7 +287,7 @@ async def large_transfers(
     operators. Each row is a single verifiable transaction — the most directly
     checkable output this miner produces."""
     operators = attributed_operators()
-    flows = await asyncio.gather(*(collect_flow(c, hours) for c in operators))
+    flows = await collect_flows(operators, hours)
 
     rows = []
     for flow in flows:
@@ -386,13 +412,15 @@ def coverage_report() -> dict:
         "operators_attributed": len(attributed),
         "operators_unattributed": len(unattributed),
         "wallet_clusters": sum(len(c.wallets) for c in attributed),
-        "chains_covered": sorted({w.chain for c in attributed for w in c.wallets}),
+        "chains_covered": list(INDEXED_CHAINS) if attributed else [],
+        "chains_claimed": sorted({w.chain for c in attributed for w in c.wallets}),
         "attributed": [
             {
                 "slug": c.slug,
                 "name": c.name,
                 "wallets": len(c.wallets),
                 "chains": c.chains,
+                "chains_queried": c.queried_chains,
                 "evidence_status": c.best_evidence,
             }
             for c in attributed
@@ -410,10 +438,20 @@ def coverage_report() -> dict:
 
 
 def _worst(sources: list[str]) -> str:
+    """Provenance downgrade order.
+
+    `unsupported_chain` sits between `unavailable` and `demo` — it is an
+    honest coverage gap for non-EVM registry entries, not an outage or a
+    fabrication. Filter it out before ranking; if it is the ONLY source
+    (nothing readable exists), degrade to `unavailable`.
+    """
     if not sources:
         return "unavailable"
+    readable = [s for s in sources if s != "unsupported_chain"]
+    if not readable:
+        return "unavailable"
     for level in ("unavailable", "demo"):
-        if level in sources:
+        if level in readable:
             return level
     return "live"
 
@@ -438,6 +476,7 @@ async def operator_treasury(slug: str) -> dict:
     if not operators:
         return {"slug": slug, "error": "operator not attributed", "holdings": []}
     casino = operators[0]
+    targets = observation_targets(casino)
 
     async def per_wallet(w) -> tuple[str, float, list, str]:
         (native, nsrc), (tokens, tsrc) = await asyncio.gather(
@@ -446,17 +485,17 @@ async def operator_treasury(slug: str) -> dict:
         )
         return w.address, native, tokens, _worst([nsrc, tsrc])
 
-    results = await asyncio.gather(*(per_wallet(w) for w in casino.wallets))
+    results = await asyncio.gather(*(per_wallet(w) for w in targets)) if targets else []
 
     # Price every distinct symbol in one call.
     symbols = {t.symbol for _, _, toks, _ in results for t in toks}
-    native_syms = {NATIVE_SYMBOL.get(w.chain, "ETH") for w in casino.wallets}
+    native_syms = {NATIVE_SYMBOL.get(w.chain, "ETH") for w in targets}
     prices = await resolve_prices(symbols | native_syms)
 
     by_symbol: dict[str, dict] = defaultdict(lambda: {"amount": 0.0, "usd": 0.0})
     per_wallet_rows = []
 
-    for (addr, native, tokens, src), wallet in zip(results, casino.wallets):
+    for (addr, native, tokens, src), wallet in zip(results, targets):
         nsym = NATIVE_SYMBOL.get(wallet.chain, "ETH")
         wallet_usd = 0.0
 
@@ -513,7 +552,8 @@ async def operator_treasury(slug: str) -> dict:
         "holdings": holdings,
         "wallets": per_wallet_rows,
         "clusters_read": len(casino.wallets),
-        "chains": casino.chains,
+        "chains": sorted({row["chain"] for row in per_wallet_rows if row["total_usd"] > 0}),
+        "chains_queried": casino.queried_chains,
         "data_source": _worst([r["data_source"] for r in per_wallet_rows]),
         "caveat": (
             "Balances of attributed clusters on covered chains only. This is not a "

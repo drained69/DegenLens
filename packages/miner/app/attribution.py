@@ -31,9 +31,9 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from .onchain import get_transfers
+from .onchain import get_observation_transfers, get_transfers
 from .prices import resolve_prices
-from .wallets import CONFIDENCE_CEILING, Casino, attributed_operators, get_casino
+from .wallets import CONFIDENCE_CEILING, Casino, attributed_operators, get_casino, observation_targets
 
 # A candidate must clear all of these before it is worth a reviewer's time.
 MIN_SHARED_VALUE_USD = 25_000
@@ -193,8 +193,20 @@ async def discover_for_operator(
     )
     cluster_counterparties: set[str] = set()
 
-    for wallet in casino.wallets:
-        tset = await get_transfers(wallet.address, wallet.chain, hours)
+    targets = observation_targets(casino)
+    seed_pairs = {(w.address.lower(), w.chain) for w in casino.wallets}
+    cluster_sets = await asyncio.gather(
+        *(
+            get_observation_transfers(
+                wallet.address,
+                wallet.chain,
+                hours,
+                seed=(wallet.address.lower(), wallet.chain) in seed_pairs,
+            )
+            for wallet in targets
+        )
+    )
+    for wallet, tset in zip(targets, cluster_sets):
         prices = await resolve_prices({t.token_symbol for t in tset.transfers})
         addr = wallet.address.lower()
 
@@ -207,7 +219,7 @@ async def discover_for_operator(
                 continue  # movement inside the known cluster
             cluster_counterparties.add(other)
             rec = agg[other]
-            rec["chain"] = wallet.chain
+            rec["chain"] = t.chain
             rec["n"] += 1
             if t.to_addr == addr:
                 rec["in"] += usd

@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { LargeTransfers } from "@degenlens/shared";
 import { formatUsd, truncateAddress } from "@degenlens/shared";
-import { telegraph } from "@/lib/telegraph";
+import { telegraph, telegraphMinerId } from "@/lib/telegraph";
 import { Panel } from "@/components/panel";
 import { EvidenceClass } from "@/components/confidence";
 import { DataSourceBadge, ProvenanceNotice } from "@/components/data-source";
@@ -37,7 +37,7 @@ export default async function FlowsPage({
   let feed: LargeTransfers | undefined;
   try {
     const res = await telegraph.askDirect<LargeTransfers>(
-      "local",
+      telegraphMinerId,
       `/market/large-transfers?hours=${hours}&min_usd=${minUsd}&limit=100`,
       {},
       "GET",
@@ -189,17 +189,17 @@ export default async function FlowsPage({
                       {r.chain}
                     </td>
                     <td className="py-2.5 pr-4 font-mono text-xs text-slate-500">
-                      {r.timestamp.slice(5, 16).replace("T", " ")}
+                      <time dateTime={r.timestamp}>{new Date(r.timestamp).toLocaleString()}</time>
                     </td>
                     <td className="py-2.5 pr-4">
-                      <a
-                        href={`${EXPLORER[r.chain] ?? EXPLORER.ethereum}${r.tx_hash}`}
+                      {EXPLORER[r.chain] ? <a
+                        href={`${EXPLORER[r.chain]}${r.tx_hash}`}
                         target="_blank"
                         rel="noreferrer"
                         className="font-mono text-xs text-neon-cyan hover:underline"
                       >
-                        verify ↗
-                      </a>
+                        verify {r.chain} ↗
+                      </a> : <span className="text-slate-500">unavailable</span>}
                     </td>
                   </tr>
                 ))}

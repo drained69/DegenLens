@@ -21,12 +21,27 @@ can actually produce flow figures. `catalog()` returns everything, with an
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 Chain = Literal[
-    "ethereum", "base", "polygon", "arbitrum", "optimism", "bsc", "avalanche"
+    "ethereum", "base", "polygon", "arbitrum", "optimism", "bsc", "avalanche",
+    "solana", "tron", "bitcoin"
 ]
+
+# Every chain the EVM adapter can query. An EVM address is an identity, not a
+# single-network claim — operators reuse the same hot wallet on every chain
+# they accept deposits on.
+INDEXED_CHAINS: tuple[Chain, ...] = (
+    "ethereum",
+    "base",
+    "polygon",
+    "arbitrum",
+    "optimism",
+    "bsc",
+    "avalanche",
+)
+EVM_CHAINS = set(INDEXED_CHAINS)
 
 EvidenceStatus = Literal["verified", "curated", "unverified_seed"]
 
@@ -49,6 +64,8 @@ class WalletCluster:
     evidence_status: EvidenceStatus
     evidence: tuple[str, ...] = ()
     last_reviewed: str = "2026-08-17"
+    source: str = "unverified"
+    discovered_at: str = "2026-08-17T00:00:00+00:00"
 
     def __post_init__(self) -> None:
         ceiling = CONFIDENCE_CEILING[self.evidence_status]
@@ -75,6 +92,12 @@ class Casino:
 
     @property
     def chains(self) -> list[str]:
+        """Networks with an explicit wallet claim in the registry."""
+        return sorted({w.chain for w in self.wallets})
+
+    @property
+    def queried_chains(self) -> list[str]:
+        """Networks with explicit claims that the pipeline should attempt."""
         return sorted({w.chain for w in self.wallets})
 
     @property
@@ -86,6 +109,24 @@ class Casino:
             if any(w.evidence_status == status for w in self.wallets):
                 return status
         return None
+
+
+def observation_targets(casino: Casino) -> list[WalletCluster]:
+    """Return only explicitly registered wallet/network identities.
+
+    An Ethereum label is not evidence that the same address belongs to the
+    operator on another chain. Gamstat publishes chain-specific cluster
+    identities, so expanding Ethereum addresses would manufacture coverage and
+    produce misleading zero-flow rows.
+    """
+    seen: set[tuple[str, str]] = set()
+    targets: list[WalletCluster] = []
+    for wallet in casino.wallets:
+        key = (wallet.address.lower(), wallet.chain)
+        if key not in seen:
+            seen.add(key)
+            targets.append(wallet)
+    return targets
 
 
 def _seed(address: str, chain: Chain, role: str = "hot") -> WalletCluster:
@@ -102,7 +143,147 @@ def _seed(address: str, chain: Chain, role: str = "hot") -> WalletCluster:
         confidence=CONFIDENCE_CEILING["unverified_seed"],
         evidence_status="unverified_seed",
         evidence=("public block-explorer label; not confirmed by operator",),
+        source="public block-explorer label",
     )
+
+
+def _public_label(address: str, label: str) -> WalletCluster:
+    """A public explorer label with enough provenance for a curated seed."""
+    return WalletCluster(
+        address=address,
+        chain="ethereum",
+        role="hot",
+        confidence=CONFIDENCE_CEILING["curated"],
+        evidence_status="curated",
+        evidence=(
+            f"Etherscan/chain explorer public label: {label}; "
+            "cross-chain label returned by supported explorers",
+        ),
+        source="Etherscan public label",
+    )
+
+
+def _gamstat_label(
+    address: str,
+    chain: Chain,
+    role: str = "hot",
+    source_confidence: float = 0.9,
+    explorer_url: str | None = None,
+    casino_name: str = "Shuffle",
+    source_url: str = "https://gamstat.io/casinos/shuffle",
+) -> WalletCluster:
+    """A Gamstat cluster label; not independently verified here."""
+    evidence = [
+        f"Gamstat {casino_name} cluster wallet listing; source confidence {source_confidence}",
+        "Requires independent explorer/RPC confirmation before verified status",
+    ]
+    if explorer_url:
+        evidence.append(f"Explorer source: {explorer_url}")
+    return WalletCluster(
+        address=address,
+        chain=chain,
+        role=role,  # type: ignore[arg-type]
+        confidence=CONFIDENCE_CEILING["curated"],
+        evidence_status="curated",
+        evidence=tuple(evidence),
+        last_reviewed="2026-08-20",
+        source=source_url,
+        discovered_at="2026-08-20T00:00:00+00:00",
+    )
+
+
+def _supplied_explorer_label(address: str, chain: Chain, explorer_url: str) -> WalletCluster:
+    """Record an explicit chain-specific wallet supplied for review."""
+    return WalletCluster(
+        address=address,
+        chain=chain,
+        role="hot",
+        confidence=CONFIDENCE_CEILING["curated"],
+        evidence=(
+            "User-supplied public block-explorer address; requires independent ownership review",
+            f"Explorer source: {explorer_url}",
+        ),
+        evidence_status="curated",
+        source="user-supplied block explorer",
+    )
+
+
+def _cross_chain_activity_label(address: str, chain: Chain) -> WalletCluster:
+    """Record live activity without claiming cross-chain ownership."""
+    return WalletCluster(
+        address=address,
+        chain=chain,
+        role="hot",
+        confidence=CONFIDENCE_CEILING["curated"],
+        evidence=(
+            "Live RPC activity probe found transfers for this address on this chain",
+            "Cross-chain activity does not independently prove Stake ownership; review required",
+        ),
+        evidence_status="curated",
+        source="Alchemy cross-chain activity probe",
+    )
+
+
+STAKE_CROSS_CHAIN_WALLETS: tuple[WalletCluster, ...] = (
+    # These are added only where the live probe found activity and a usable
+    # activity timestamp. Zero-activity and ambiguous rows remain unregistered.
+    _cross_chain_activity_label("0x019d0706d65c4768ec8081ed7ce41f59eef9b86c", "base"),
+    _cross_chain_activity_label("0x019d0706d65c4768ec8081ed7ce41f59eef9b86c", "arbitrum"),
+    _cross_chain_activity_label("0x019d0706d65c4768ec8081ed7ce41f59eef9b86c", "optimism"),
+    _cross_chain_activity_label("0x019d0706d65c4768ec8081ed7ce41f59eef9b86c", "bsc"),
+    _cross_chain_activity_label("0x0392b64b8bfda184f0a72ce37d73dc7df978c4f7", "base"),
+    _cross_chain_activity_label("0x0392b64b8bfda184f0a72ce37d73dc7df978c4f7", "polygon"),
+    _cross_chain_activity_label("0x0392b64b8bfda184f0a72ce37d73dc7df978c4f7", "bsc"),
+    _cross_chain_activity_label("0x6872b6630a3afcd3117191a8403c2002e13df7de", "base"),
+    _cross_chain_activity_label("0x6872b6630a3afcd3117191a8403c2002e13df7de", "optimism"),
+    _cross_chain_activity_label("0x6e29f75b0350fd0e85ee34a21ef94767b0186996", "base"),
+    _cross_chain_activity_label("0x6e29f75b0350fd0e85ee34a21ef94767b0186996", "polygon"),
+    _cross_chain_activity_label("0x6e29f75b0350fd0e85ee34a21ef94767b0186996", "arbitrum"),
+    _cross_chain_activity_label("0x6e29f75b0350fd0e85ee34a21ef94767b0186996", "optimism"),
+    _cross_chain_activity_label("0x6e29f75b0350fd0e85ee34a21ef94767b0186996", "bsc"),
+    _cross_chain_activity_label("0x758be77a3ee14e7193730560daa07dd3fcbfd200", "base"),
+    _cross_chain_activity_label("0x758be77a3ee14e7193730560daa07dd3fcbfd200", "polygon"),
+    _cross_chain_activity_label("0x758be77a3ee14e7193730560daa07dd3fcbfd200", "arbitrum"),
+    _cross_chain_activity_label("0x758be77a3ee14e7193730560daa07dd3fcbfd200", "optimism"),
+    _cross_chain_activity_label("0x758be77a3ee14e7193730560daa07dd3fcbfd200", "bsc"),
+    _cross_chain_activity_label("0x787b8840100d9baadd7463f4a73b5ba73b00c6ca", "base"),
+    _cross_chain_activity_label("0x787b8840100d9baadd7463f4a73b5ba73b00c6ca", "polygon"),
+    _cross_chain_activity_label("0x787b8840100d9baadd7463f4a73b5ba73b00c6ca", "arbitrum"),
+    _cross_chain_activity_label("0x787b8840100d9baadd7463f4a73b5ba73b00c6ca", "optimism"),
+    _cross_chain_activity_label("0x787b8840100d9baadd7463f4a73b5ba73b00c6ca", "bsc"),
+    _cross_chain_activity_label("0x974caa59e49682cda0ad2bbe82983419a2ecc400", "base"),
+    _cross_chain_activity_label("0x974caa59e49682cda0ad2bbe82983419a2ecc400", "polygon"),
+    _cross_chain_activity_label("0x974caa59e49682cda0ad2bbe82983419a2ecc400", "arbitrum"),
+    _cross_chain_activity_label("0x974caa59e49682cda0ad2bbe82983419a2ecc400", "optimism"),
+    _cross_chain_activity_label("0x974caa59e49682cda0ad2bbe82983419a2ecc400", "bsc"),
+    _cross_chain_activity_label("0xa29148c2a656e5ddc68acb95626d6b64a1131c06", "bsc"),
+    _cross_chain_activity_label("0xb04c0eb29c72cebc467b9d4944d29116fa02c44a", "base"),
+    _cross_chain_activity_label("0xb04c0eb29c72cebc467b9d4944d29116fa02c44a", "polygon"),
+    _cross_chain_activity_label("0xb04c0eb29c72cebc467b9d4944d29116fa02c44a", "bsc"),
+    _cross_chain_activity_label("0xb2723beacce4bc54f23544343927f048cef6bd5a", "base"),
+    _cross_chain_activity_label("0xb2723beacce4bc54f23544343927f048cef6bd5a", "polygon"),
+    _cross_chain_activity_label("0xb2723beacce4bc54f23544343927f048cef6bd5a", "bsc"),
+    _cross_chain_activity_label("0xbbc43c282b2f829176f4fc3802436d8fad3413f3", "polygon"),
+    _cross_chain_activity_label("0xbbc43c282b2f829176f4fc3802436d8fad3413f3", "bsc"),
+    _cross_chain_activity_label("0xd523794c879d9ec028960a231f866758e405be34", "base"),
+    _cross_chain_activity_label("0xd523794c879d9ec028960a231f866758e405be34", "polygon"),
+    _cross_chain_activity_label("0xd523794c879d9ec028960a231f866758e405be34", "optimism"),
+    _cross_chain_activity_label("0xd523794c879d9ec028960a231f866758e405be34", "bsc"),
+    _cross_chain_activity_label("0xdebfbe80c8aeba98a32968278463ccb639c6c4e3", "polygon"),
+    _cross_chain_activity_label("0xdebfbe80c8aeba98a32968278463ccb639c6c4e3", "bsc"),
+    _cross_chain_activity_label("0xdf1fc5523f2e5ea4f6dac2eaed3263953a391b0c", "base"),
+    _cross_chain_activity_label("0xdf1fc5523f2e5ea4f6dac2eaed3263953a391b0c", "polygon"),
+    _cross_chain_activity_label("0xdf1fc5523f2e5ea4f6dac2eaed3263953a391b0c", "arbitrum"),
+    _cross_chain_activity_label("0xdf1fc5523f2e5ea4f6dac2eaed3263953a391b0c", "optimism"),
+    _cross_chain_activity_label("0xdf1fc5523f2e5ea4f6dac2eaed3263953a391b0c", "bsc"),
+    _cross_chain_activity_label("0xf598b81ef8c7b52a7f2a89253436e72ec6dc871f", "base"),
+    _cross_chain_activity_label("0xf598b81ef8c7b52a7f2a89253436e72ec6dc871f", "polygon"),
+    _cross_chain_activity_label("0xf598b81ef8c7b52a7f2a89253436e72ec6dc871f", "bsc"),
+    _cross_chain_activity_label("0xfa500178de024bf43cfa69b7e636a28ab68f2741", "base"),
+    _cross_chain_activity_label("0xfa500178de024bf43cfa69b7e636a28ab68f2741", "polygon"),
+    _cross_chain_activity_label("0xfa500178de024bf43cfa69b7e636a28ab68f2741", "arbitrum"),
+    _cross_chain_activity_label("0xfa500178de024bf43cfa69b7e636a28ab68f2741", "optimism"),
+)
 
 
 # ── Operator catalog ─────────────────────────────────────────────────────────
@@ -117,8 +298,99 @@ CASINOS: dict[str, Casino] = {
         licensed_in="Curaçao",
         established=2017,
         wallets=(
-            _seed("0x974caa59e49682cda0ad2bbe82983419a2ecc400", "ethereum", "hot"),
-            _seed("0xb1c73f13a26cb15b93c3d2eab7e77f56b8ffe6d3", "ethereum", "cold"),
+            _supplied_explorer_label(
+                "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
+                "ethereum",
+                "https://etherscan.io/address/0x974caa59e49682cda0ad2bbe82983419a2ecc400",
+            ),
+            _public_label("0xa29148c2a656e5ddc68acb95626d6b64a1131c06", "Stake.com 10"),
+            _supplied_explorer_label(
+                "0x787b8840100d9baadd7463f4a73b5ba73b00c6ca",
+                "ethereum",
+                "https://etherscan.io/address/0x787b8840100d9baadd7463f4a73b5ba73b00c6ca",
+            ),
+            _public_label("0xbbc43c282b2f829176f4fc3802436d8fad3413f3", "Stake.com 12"),
+            _public_label("0x758be77a3ee14e7193730560daa07dd3fcbfd200", "Stake.com 13"),
+            # "Stake.com 14" (0x6f4196…9cece) was verified to have zero lifetime
+            # transfers on ethereum (2026-08-20 probe). Removed so it stops
+            # contributing to the operator's usable-claims count. If the address
+            # is a mislabelled cold or setup wallet on a chain we don't yet
+            # index, re-add with an `observe_on=(…)` targeted at that chain.
+            _supplied_explorer_label(
+                "0xdf1fc5523f2e5ea4f6dac2eaed3263953a391b0c",
+                "ethereum",
+                "https://etherscan.io/address/0xdf1fc5523f2e5ea4f6dac2eaed3263953a391b0c",
+            ),
+            _supplied_explorer_label(
+                "0xd523794c879d9ec028960a231f866758e405be34",
+                "ethereum",
+                "https://etherscan.io/address/0xd523794c879d9ec028960a231f866758e405be34",
+            ),
+            _supplied_explorer_label(
+                "0xdebfbe80c8aeba98a32968278463ccb639c6c4e3",
+                "ethereum",
+                "https://etherscan.io/address/0xdebfbe80c8aeba98a32968278463ccb639c6c4e3",
+            ),
+            _supplied_explorer_label(
+                "0x6e29f75b0350fd0e85ee34a21ef94767b0186996",
+                "ethereum",
+                "https://etherscan.io/address/0x6e29f75b0350fd0e85ee34a21ef94767b0186996",
+            ),
+            _supplied_explorer_label(
+                "0xb04c0eb29c72cebc467b9d4944d29116fa02c44a",
+                "ethereum",
+                "https://etherscan.io/address/0xb04c0eb29c72cebc467b9d4944d29116fa02c44a",
+            ),
+            _public_label("0xb2723beacce4bc54f23544343927f048cef6bd5a", "Stake.com 5"),
+            _public_label("0xfa500178de024bf43cfa69b7e636a28ab68f2741", "Stake.com 6"),
+            _public_label("0xf598b81ef8c7b52a7f2a89253436e72ec6dc871f", "Stake.com 7"),
+            _public_label("0x0392b64b8bfda184f0a72ce37d73dc7df978c4f7", "Stake.com 8"),
+            _supplied_explorer_label(
+                "0x019d0706d65c4768ec8081ed7ce41f59eef9b86c",
+                "ethereum",
+                "https://etherscan.io/address/0x019d0706d65c4768ec8081ed7ce41f59eef9b86c",
+            ),
+            _supplied_explorer_label(
+                "G9X7F4JzLzbSGMCndiBdWNi5YzZZakmtkdwq7xS3Q3FE",
+                "solana",
+                "https://solscan.io/account/G9X7F4JzLzbSGMCndiBdWNi5YzZZakmtkdwq7xS3Q3FE",
+            ),
+            _supplied_explorer_label(
+                "TZ8Ksz21Hk1tQuztCKCUJBRXStCav9uyjM",
+                "tron",
+                "https://tronscan.org/#/address/TZ8Ksz21Hk1tQuztCKCUJBRXStCav9uyjM",
+            ),
+            _supplied_explorer_label(
+                "0x6872b6630a3afcd3117191a8403c2002e13df7de",
+                "bsc",
+                "https://bscscan.com/address/0x6872b6630a3afcd3117191a8403c2002e13df7de",
+            ),
+            _supplied_explorer_label(
+                "0x6872b6630a3afcd3117191a8403c2002e13df7de",
+                "ethereum",
+                "https://etherscan.io/address/0x6872b6630a3afcd3117191a8403c2002e13df7de",
+            ),
+            _supplied_explorer_label(
+                "0xfa500178de024bf43cfa69b7e636a28ab68f2741",
+                "bsc",
+                "https://bscscan.com/address/0xfa500178de024bf43cfa69b7e636a28ab68f2741",
+            ),
+            _supplied_explorer_label(
+                "0x6872b6630a3afcd3117191a8403c2002e13df7de",
+                "polygon",
+                "https://polygonscan.com/address/0x6872b6630a3afcd3117191a8403c2002e13df7de",
+            ),
+            _supplied_explorer_label(
+                "0x019d0706d65c4768ec8081ed7ce41f59eef9b86c",
+                "polygon",
+                "https://polygonscan.com/address/0x019d0706d65c4768ec8081ed7ce41f59eef9b86c",
+            ),
+            _supplied_explorer_label(
+                "bc1qmd3nsuw3z7fwr3wt7ac7ydceyeyu2cflft4ltm",
+                "bitcoin",
+                "https://mempool.space/address/bc1qmd3nsuw3z7fwr3wt7ac7ydceyeyu2cflft4ltm",
+            ),
+            *STAKE_CROSS_CHAIN_WALLETS,
         ),
     ),
     "rollbit": Casino(
@@ -138,7 +410,80 @@ CASINOS: dict[str, Casino] = {
         licensed_in="Curaçao",
         established=2017,
         wallets=(
-            _seed("0xdd9f24efc84d93deef3c8745c837ab63e80abd27", "ethereum", "hot"),
+            _gamstat_label(
+                "JEBRptmAAjqtxg6c4WLQDaZPeEA8RXnW4dVyhvsvZnxQ", "solana",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0xd352e0d71e14c45b719fe31d1eaa13051ede129b", "bsc",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0xa7b9874d15742358fb455dd56f97c6d19ad74f5c", "base",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0x6adc35bbdd759be047d9d28b94f5734a9c0cb563", "polygon",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0xc199feb7ce2b17fa84162ee705ebb35a2f19407d", "ethereum",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0xe7176831c898d585cd999bcee9984a7fa9a6be96", "arbitrum",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0x120a5b1fd4782cd8639e3814781a5d30382e65db", "ethereum",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0x49395574019ae44d46d535215303a09fd596727c", "bsc",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "bc1qqpdkczlc78nkss6wspse8rerf8u9eatce3mmk0", "bitcoin",
+                source_confidence=0.7, casino_name="BC.Game",
+                source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0x3ba9ea0ffeff9efdd7cb7eafb3ac6788a21b5aa7", "ethereum", "cold",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0xf09214d414312980446c5a6133b9c3db5918b7c5", "ethereum",
+                source_confidence=0.8, casino_name="BC.Game",
+                source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0x788529118f2a28c60b9de2ba0353f5ee4293e044", "ethereum",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0x41fc802e01bcf85d91e5708b42d41c2eaf01f375", "ethereum",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0xe983fd1798689eee00c0fb77e79b8f372df41060", "ethereum",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0x5472356f1de00bca5d729cfb6419c44b8d4488ab", "ethereum",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0x9d2a0e32633d9be838bfde19d510e6aa6eb202dd", "ethereum",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "0x8aaf720bbbcac82c592ac8f6c628bbac1590e079", "ethereum",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
+            _gamstat_label(
+                "TTUM1sLKN5735BdrdsJqLPnYaKESeWQGkB", "tron",
+                casino_name="BC.Game", source_url="https://gamstat.io/casinos/bc-game",
+            ),
         ),
     ),
     "shuffle": Casino(
@@ -148,7 +493,75 @@ CASINOS: dict[str, Casino] = {
         licensed_in="Anjouan",
         established=2023,
         wallets=(
-            _seed("0x9b1f7f645351af3631a656421ed2e40f2802e6c0", "ethereum", "hot"),
+            _gamstat_label(
+                "0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "bsc", "cold"
+            ),
+            _gamstat_label(
+                "76iXe9yKFDjGv3HicUVVy8AYxHLC71L1wYa12zaZzHHp",
+                "solana",
+                explorer_url="https://solscan.io/account/76iXe9yKFDjGv3HicUVVy8AYxHLC71L1wYa12zaZzHHp",
+            ),
+            _gamstat_label(
+                "0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "ethereum", "cold"
+            ),
+            _gamstat_label(
+                "0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "base"
+            ),
+            _gamstat_label(
+                "TWGSJz33dNGMhQYhSRLSKKUyFNewh8JEnp",
+                "tron",
+                explorer_url="https://tronscan.org/#/address/TWGSJz33dNGMhQYhSRLSKKUyFNewh8JEnp",
+            ),
+            _gamstat_label(
+                "0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "polygon"
+            ),
+            _gamstat_label(
+                "0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "arbitrum"
+            ),
+            _gamstat_label(
+                "Eq9p5iHVbNR4miwmFMkpuPwLLULZmPTxNUPBgLdNrWYy",
+                "solana",
+                explorer_url="https://solscan.io/account/Eq9p5iHVbNR4miwmFMkpuPwLLULZmPTxNUPBgLdNrWYy",
+            ),
+            _gamstat_label(
+                "0x911a978f0cac392079b51db03e6f3027dfe6f96e", "bsc"
+            ),
+            _gamstat_label(
+                "0x911a978f0cac392079b51db03e6f3027dfe6f96e",
+                "ethereum",
+                source_confidence=0.7,
+            ),
+            _gamstat_label(
+                "0x911a978f0cac392079b51db03e6f3027dfe6f96e", "polygon"
+            ),
+            _gamstat_label(
+                "0x911a978f0cac392079b51db03e6f3027dfe6f96e",
+                "base",
+                source_confidence=0.7,
+            ),
+        ),
+    ),
+    "yeet": Casino(
+        slug="yeet",
+        name="Yeet",
+        website="https://yeet.com",
+        established=2023,
+        wallets=tuple(
+            _gamstat_label(
+                address,
+                chain,
+                casino_name="Yeet",
+                source_url="https://gamstat.io/casinos/yeet",
+            )
+            for address, chain in (
+                ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "ethereum"),
+                ("TPKJ2wzjxASvQZQBmyegQrU1hExL2yvnLN", "tron"),
+                ("6UxrMpGdiqsncwBawPjxsZtQb3e6nsgYo1pVSbSeNAaE", "solana"),
+                ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "polygon"),
+                ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "bsc"),
+                ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "base"),
+                ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "arbitrum"),
+            )
         ),
     ),
     "betfury": Casino(
@@ -157,9 +570,6 @@ CASINOS: dict[str, Casino] = {
         website="https://betfury.com",
         licensed_in="Curaçao",
         established=2019,
-        wallets=(
-            _seed("0x03bdf69b1322d623836afbd27679a1c0afa067e9", "ethereum", "hot"),
-        ),
     ),
     # ── Catalogued, not yet attributed ───────────────────────────────────────
     # Known operators with no reviewed wallet claim. Present so coverage gaps
@@ -361,7 +771,7 @@ def coverage_summary() -> dict[str, int]:
         "operators_attributed": len(attributed),
         "operators_unattributed": len(CASINOS) - len(attributed),
         "wallet_clusters": sum(len(c.wallets) for c in attributed),
-        "chains_covered": len({w.chain for c in attributed for w in c.wallets}),
+        "chains_covered": len(INDEXED_CHAINS) if attributed else 0,
     }
 
 

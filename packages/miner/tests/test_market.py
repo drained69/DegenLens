@@ -80,9 +80,57 @@ def test_catalog_endpoint_includes_attributed_and_unobserved_operators():
     assert body["unattributed_count"] == len(catalog()) - len(attributed_operators())
     statuses = {row["attribution_status"] for row in body["casinos"]}
     assert statuses == {"attributed", "unobserved"}
+    from app.wallets import get_casino
+
+    # Registry expanded from single-network to real multi-chain identity:
+    # Stake publishes distinct hot wallets on multiple chains including
+    # non-EVM identity rows (bitcoin/solana/tron). Precise counts drift as
+    # more addresses are labelled, so assert what the registry actually
+    # declares rather than a fixed number.
+    stake = next(row for row in body["casinos"] if row["slug"] == "stake")
+    registered_chains = get_casino("stake").chains
+    assert "ethereum" in stake["chains"]
+    assert stake["wallet_count"] >= 15
+    assert set(stake["queried_chains"]) == set(registered_chains), (
+        "queried chains must equal registered chains — no auto-mirroring, "
+        "no silent omissions"
+    )
 
 
 # ── Naming discipline ────────────────────────────────────────────────────────
+
+
+def test_network_distribution_reflects_registered_chains(monkeypatch):
+    """The market view surfaces every chain that has a registered wallet claim.
+
+    The prior test asserted that every EVM chain in INDEXED_CHAINS appeared —
+    which required auto-mirroring a single Ethereum label onto seven networks.
+    That contradicted `observation_targets()` (an Ethereum label is not
+    evidence for the same address on another chain) so the assertion is now
+    scoped to what the registry actually declares.
+    """
+    from app.onchain import _CACHE
+    from app.settings import Settings, settings
+    from app.wallets import attributed_operators
+
+    monkeypatch.setattr(
+        Settings, "live_data_available", property(lambda self: False)
+    )
+    monkeypatch.setattr(settings, "strict_mode", False)
+    _CACHE.clear()
+
+    registered = {
+        w.chain
+        for c in attributed_operators()
+        for w in c.wallets
+        if w.chain in {"ethereum", "base", "polygon", "arbitrum",
+                       "optimism", "bsc", "avalanche"}
+    }
+    body = client.get("/market/networks?hours=24").json()
+    chains = {row["chain"] for row in body["chains"]}
+    assert chains >= registered, (
+        f"missing chain(s) with a registered wallet: {registered - chains}"
+    )
 
 
 def test_shares_are_scoped_to_observed_flow():
@@ -143,3 +191,47 @@ def test_flow_confidence_is_capped_by_attribution_uncertainty():
     assert _flow_confidence("live", False) < _flow_confidence("live", True)
     assert _flow_confidence("demo", True) < _flow_confidence("live", True)
     assert _flow_confidence("unavailable", True) == 0.0
+
+
+# ── Module/function shadowing ────────────────────────────────────────────────
+
+
+def test_health_module_is_not_shadowed_by_the_health_endpoint():
+    """`async def health()` shadowed the `health` module import, so
+    `health.registry_health` resolved against the function object and every
+    call 500'd internally. The never-5xx middleware masked it as a 200 with
+    verdict "unavailable", which is why it reached production unnoticed.
+
+    Pin the aliased import so the collision cannot silently return.
+    """
+    from app import main
+
+    assert hasattr(main, "health_checks"), "health module must be imported aliased"
+    assert hasattr(main.health_checks, "registry_health")
+    assert hasattr(main.health_checks, "operator_health")
+
+
+def test_health_endpoints_do_not_return_internal_errors():
+    for path in ("/health/registry?hours=24", "/health/operator/stake?hours=24"):
+        body = client.get(path).json()
+        assert body.get("error") is None, f"{path} returned {body.get('error')}"
+        assert body["verdict"] != "unavailable"
+
+
+def test_no_endpoint_returns_an_internal_error():
+    """Sweep every GET route for masked exceptions.
+
+    The middleware converts a throw into a 200, which protects the Canonical
+    Score but hides bugs — so assert explicitly that none are firing.
+    """
+    from app.main import app as fastapi_app
+
+    skip = {"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect", "/"}
+    for route in fastapi_app.routes:
+        methods = getattr(route, "methods", set())
+        path = getattr(route, "path", "")
+        if "GET" not in methods or path in skip or "{" in path:
+            continue
+        body = client.get(f"{path}?hours=24").json()
+        if isinstance(body, dict):
+            assert body.get("error") is None, f"{path} raised {body.get('error')}"

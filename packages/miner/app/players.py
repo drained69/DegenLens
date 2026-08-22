@@ -39,7 +39,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .market import collect_flow, _worst
+from .market import collect_flows, _worst
 from .onchain import get_transfers
 from .prices import resolve_prices
 from .wallets import attributed_operators, resolve_wallet
@@ -340,7 +340,8 @@ async def evaluate_player(
 
 
 async def player_leaderboard(
-    hours: int = 168, limit: int = 25, exclude_infrastructure: bool = True
+    hours: int = 168, limit: int = 25, exclude_infrastructure: bool = True,
+    casino_slug: str | None = None,
 ) -> dict:
     """Rank counterparties by net observed position across operator clusters.
 
@@ -350,7 +351,9 @@ async def player_leaderboard(
     invisible, and non-wager flows are indistinguishable from winnings.
     """
     operators = attributed_operators()
-    flows = await asyncio.gather(*(collect_flow(c, hours) for c in operators))
+    if casino_slug:
+        operators = [operator for operator in operators if operator.slug == casino_slug]
+    flows = await collect_flows(operators, hours)
 
     agg: dict[str, dict] = defaultdict(
         lambda: {
@@ -358,13 +361,27 @@ async def player_leaderboard(
             "received": 0.0,
             "transfers": 0,
             "operators": set(),
+            "chains": set(),
             "first": None,
             "last": None,
         }
     )
+    per_casino: dict[str, dict[str, dict]] = {}
 
     for flow in flows:
         cluster = flow.wallet_addresses
+        casino_agg: dict[str, dict] = defaultdict(
+            lambda: {
+                "sent": 0.0,
+                "received": 0.0,
+                "transfers": 0,
+                "operators": {flow.casino.slug},
+                "chains": set(),
+                "first": None,
+                "last": None,
+            }
+        )
+        per_casino[flow.casino.slug] = casino_agg
         for t in flow.transfers:
             usd = flow.usd(t)
             if usd <= 0:
@@ -381,19 +398,31 @@ async def player_leaderboard(
             rec[key] += usd
             rec["transfers"] += 1
             rec["operators"].add(flow.casino.slug)
+            rec["chains"].add(t.chain)
             ts = t.timestamp.isoformat()
             rec["first"] = min(rec["first"], ts) if rec["first"] else ts
             rec["last"] = max(rec["last"], ts) if rec["last"] else ts
 
-    rows = []
-    for addr, r in agg.items():
-        gross = r["sent"] + r["received"]
-        entity_class, reasons = _classify_entity(
-            len(r["operators"]), gross, int(r["transfers"]), 0,
-            r["sent"], r["received"],
-        )
-        rows.append(
-            {
+            casino_rec = casino_agg[party]
+            casino_rec[key] += usd
+            casino_rec["transfers"] += 1
+            casino_rec["chains"].add(t.chain)
+            casino_rec["first"] = (
+                min(casino_rec["first"], ts) if casino_rec["first"] else ts
+            )
+            casino_rec["last"] = (
+                max(casino_rec["last"], ts) if casino_rec["last"] else ts
+            )
+
+    def make_rows(records: dict[str, dict]) -> list[dict]:
+        rows = []
+        for addr, r in records.items():
+            gross = r["sent"] + r["received"]
+            entity_class, reasons = _classify_entity(
+                len(r["operators"]), gross, int(r["transfers"]), 0,
+                r["sent"], r["received"],
+            )
+            rows.append({
                 "address": addr,
                 "sent_to_operators_usd": round(r["sent"], 2),
                 "received_from_operators_usd": round(r["received"], 2),
@@ -402,12 +431,15 @@ async def player_leaderboard(
                 "transfers": int(r["transfers"]),
                 "operators_touched": len(r["operators"]),
                 "operators": sorted(r["operators"]),
+                "chains": sorted(r["chains"]),
                 "entity_class": entity_class,
                 "classification_reasons": reasons,
                 "first_seen": r["first"],
                 "last_seen": r["last"],
-            }
-        )
+            })
+        return rows
+
+    rows = make_rows(agg)
 
     considered = (
         [r for r in rows if r["entity_class"] == "individual_candidate"]
@@ -430,8 +462,43 @@ async def player_leaderboard(
         key=lambda r: -r["gross_flow_usd"],
     )[:limit]
 
+    casino_boards = []
+    for flow in flows:
+        casino_rows = make_rows(per_casino[flow.casino.slug])
+        candidates = [
+            row for row in casino_rows if row["entity_class"] == "individual_candidate"
+        ]
+        ranked = [
+            row for row in casino_rows if row["entity_class"] != "infrastructure"
+        ]
+        casino_boards.append({
+            "slug": flow.casino.slug,
+            "name": flow.casino.name,
+            "addresses_observed": len(casino_rows),
+            "individual_candidates": len(candidates),
+            "chains_observed": sorted({
+                chain for row in casino_rows for chain in row["chains"]
+            }),
+            "chains_attributed": sorted({wallet.chain for wallet in flow.casino.wallets}),
+            "chains_queried": flow.casino.queried_chains,
+            "by_settlement_volume": sorted(
+                ranked, key=lambda row: -row["gross_flow_usd"]
+            )[:limit],
+            "net_received": sorted(
+                (row for row in ranked if row["net_position_usd"] > 0),
+                key=lambda row: -row["net_position_usd"],
+            )[:limit],
+            "net_sent": sorted(
+                (row for row in ranked if row["net_position_usd"] < 0),
+                key=lambda row: row["net_position_usd"],
+            )[:limit],
+            "data_source": flow.data_source,
+            "coverage_complete": flow.complete,
+        })
+
     return {
         "window_hours": hours,
+        "casino": casino_slug,
         "addresses_observed": len(rows),
         "class_counts": counts,
         "individual_candidates": counts.get("individual_candidate", 0),
@@ -441,6 +508,18 @@ async def player_leaderboard(
         "net_positive": net_positive,
         "net_negative": net_negative,
         "by_volume": by_volume,
+        "by_casino": casino_boards,
+        "chains_attributed": sorted({
+            wallet.chain for operator in operators for wallet in operator.wallets
+        }),
+        "chains_observed": sorted({
+            transfer.chain for flow in flows for transfer in flow.transfers
+        }),
+        "chains_queried": sorted({
+            chain
+            for operator in operators
+            for chain in operator.queried_chains
+        }),
         "data_source": _worst([f.data_source for f in flows]),
         "coverage_complete": all(f.complete for f in flows),
         "methodology": (
@@ -449,7 +528,9 @@ async def player_leaderboard(
             "balances held inside an operator are invisible, non-wager flows such as "
             "affiliate payouts and bonuses are indistinguishable from winnings, and one "
             "address is not proven to be one person. Addresses classified as "
-            "infrastructure are excluded by default."
+            "infrastructure are excluded by default. Per-casino boards include other "
+            "counterparty classes and rank observed settlement volume and direction, not "
+            "amount wagered or gambling profit/loss."
         ),
     }
 
@@ -486,7 +567,7 @@ async def player_cohorts(hours: int = 168) -> dict:
     operators = attributed_operators()
     # Double window so "new this period" is meaningful rather than an artefact
     # of where the window happens to start.
-    flows = await asyncio.gather(*(collect_flow(c, hours * 2) for c in operators))
+    flows = await collect_flows(operators, hours * 2)
 
     from datetime import datetime, timedelta, timezone
 
@@ -612,7 +693,7 @@ async def cross_operator_overlap(hours: int = 168) -> dict:
     draw on the same pool rather than distinct audiences.
     """
     operators = attributed_operators()
-    flows = await asyncio.gather(*(collect_flow(c, hours) for c in operators))
+    flows = await collect_flows(operators, hours)
 
     by_address: dict[str, set[str]] = defaultdict(set)
     per_operator: dict[str, set[str]] = defaultdict(set)

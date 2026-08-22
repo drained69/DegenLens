@@ -25,7 +25,7 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from .market import collect_flow, _worst
+from .market import collect_flows, _worst
 from .wallets import attributed_operators
 
 # Behavioural thresholds separating a rail from an end user.
@@ -118,7 +118,7 @@ async def provider_activity(hours: int = 168, limit: int = 25) -> dict:
     operators = attributed_operators()
     # Fetch double the window once, then split — cheaper than two passes and
     # guarantees both halves come from an identical snapshot.
-    flows = await asyncio.gather(*(collect_flow(c, hours * 2) for c in operators))
+    flows = await collect_flows(operators, hours * 2)
 
     now = datetime.now(timezone.utc)
     midpoint = now - timedelta(hours=hours)

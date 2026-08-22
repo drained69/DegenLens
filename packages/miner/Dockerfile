@@ -19,6 +19,9 @@ USER miner
 
 # Railway injects PORT at runtime; 8080 is the local default.
 ENV PORT=8080
+ENV STRICT_MODE=true \
+    MAX_UPSTREAM_CONCURRENCY=12 \
+    REQUEST_TIMEOUT_S=8
 EXPOSE 8080
 
 # Single worker on purpose. The metrics ring buffer, response cache, and circuit

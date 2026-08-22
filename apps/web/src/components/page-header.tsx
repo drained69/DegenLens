@@ -36,11 +36,11 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="border-b border-ink-700/80 pb-8">
+    <header className="relative border-b border-ink-700/80 pb-8">
       <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
         <div className="max-w-3xl">
           <Eyebrow>{eyebrow}</Eyebrow>
-          <h1 className="mt-3 text-[2rem] font-semibold leading-[1.15] tracking-tight text-white sm:text-[2.5rem]">
+          <h1 className="mt-3 max-w-4xl text-[2rem] font-semibold leading-[1.08] tracking-tight text-white sm:text-[2.75rem]">
             {title}
             {subtitle ? <span className="mt-1 block text-slate-500">{subtitle}</span> : null}
           </h1>

@@ -45,6 +45,14 @@ const nextConfig = {
         source: '/transaction/:path*',
         destination: `${miner}/transaction/:path*`,
       },
+      { source: '/coverage', destination: `${miner}/coverage` },
+      { source: '/operator/:path*', destination: `${miner}/operator/:path*` },
+      { source: '/operators/public', destination: `${miner}/operators/public` },
+      { source: '/market/:path*', destination: `${miner}/market/:path*` },
+      { source: '/player/:path*', destination: `${miner}/player/:path*` },
+      { source: '/players/:path*', destination: `${miner}/players/:path*` },
+      { source: '/attribution/:path*', destination: `${miner}/attribution/:path*` },
+      { source: '/health/:path*', destination: `${miner}/health/:path*` },
     ];
   },
 };

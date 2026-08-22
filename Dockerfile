@@ -13,6 +13,8 @@ RUN pnpm install --frozen-lockfile
 
 COPY apps/web apps/web
 COPY packages/shared packages/shared
+COPY config/miner.yaml config/miner.yaml
+COPY config/miner.yaml apps/web/config/miner.yaml
 COPY packages/miner/requirements.txt packages/miner/requirements.txt
 COPY packages/miner/app packages/miner/app
 
@@ -21,7 +23,10 @@ RUN pip3 install --break-system-packages --no-cache-dir -r packages/miner/requir
 
 ENV NODE_ENV=production \
     PORT=8080 \
-    LOCAL_MINER_URL=http://127.0.0.1:8787
+    LOCAL_MINER_URL=http://127.0.0.1:8787 \
+    STRICT_MODE=true \
+    MAX_UPSTREAM_CONCURRENCY=12 \
+    REQUEST_TIMEOUT_S=20
 
 EXPOSE 8080
 

@@ -1,4 +1,4 @@
-import { telegraph } from "@/lib/telegraph";
+import { telegraph, telegraphMinerId } from "@/lib/telegraph";
 import type { TransactionLookup } from "@degenlens/shared";
 import { truncateAddress } from "@degenlens/shared";
 import { Panel, Stat } from "@/components/panel";
@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 async function lookup(hash: string, chain: string) {
   try {
-    return await telegraph.askDirect<TransactionLookup>("local", "/transaction/lookup", { tx_hash: hash, chain });
+    return await telegraph.askDirect<TransactionLookup>(telegraphMinerId, "/transaction/lookup", { tx_hash: hash, chain });
   } catch {
     return null;
   }

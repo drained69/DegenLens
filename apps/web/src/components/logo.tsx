@@ -39,7 +39,7 @@ export function BrandMark({
       <path d="M19 0l6 6v20l-6 6V0z" />
 
       {/* The aperture — the only accent. A horizontal slot through the D's counter. */}
-      {accent && <rect x="8" y="14" width="9" height="4" fill="#4ADE80" />}
+      {accent && <rect x="8" y="14" width="9" height="4" fill="#7A5EE7" />}
 
       {/*
         The "L" — a bold stem on the right with a wider foot. Note the foot

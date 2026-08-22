@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { telegraph } from '@/lib/telegraph';
+import { telegraph, telegraphMinerId } from '@/lib/telegraph';
 import type { WalletTrace } from '@degenlens/shared';
 
 export async function GET(req: Request) {
@@ -8,7 +8,7 @@ export async function GET(req: Request) {
   const chain = new URL(req.url).searchParams.get('chain') ?? 'ethereum';
   try {
     const res = await telegraph.askDirect<WalletTrace>(
-      'local',
+      telegraphMinerId,
       '/wallet/trace',
       { address, chain },
       'POST',

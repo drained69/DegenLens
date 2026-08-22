@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { telegraph } from "@/lib/telegraph";
+import { telegraph, telegraphMinerId } from "@/lib/telegraph";
 import type { CasinoRegistry } from "@degenlens/shared";
 import { ConfidenceBadge, EvidenceClass } from "@/components/confidence";
 import { PageHeader } from "@/components/page-header";
@@ -11,7 +11,7 @@ const txPattern = /^0x[a-fA-F0-9]{64}$/;
 
 async function registry() {
   try {
-    return (await telegraph.askDirect<CasinoRegistry>("local", "/casinos", {}, "GET")).result;
+    return (await telegraph.askDirect<CasinoRegistry>(telegraphMinerId, "/casinos", {}, "GET")).result;
   } catch {
     return null;
   }
@@ -27,7 +27,7 @@ export default async function SearchPage({ searchParams }: { searchParams?: { q?
   return (
     <div className="space-y-7">
       <PageHeader
-        eyebrow="Universal investigation"
+        eyebrow="Investigation"
         title="Search the intelligence graph"
         description="Resolve an operator, wallet, or transaction into evidence-backed investigation paths."
       />
@@ -37,7 +37,7 @@ export default async function SearchPage({ searchParams }: { searchParams?: { q?
       </form>
 
       {!query && <EmptySearch />}
-      {query && txPattern.test(query) && <Result href={`/transactions/${query}?chain=ethereum`} label="Transaction" title={query} detail="Open canonical RPC facts, entity attribution, and evidence." kind="observed" />}
+      {query && txPattern.test(query) && <div className="border border-ink-700 bg-ink-900 p-5 text-sm text-slate-400">Transaction hashes need a chain before they can be resolved. Open the transaction from the transfer feed, where chain context is included.</div>}
       {query && addressPattern.test(query) && <Result href={`/wallet?address=${query}`} label="Wallet or contract" title={query} detail="Trace balance, operator exposure, and anomaly signals." kind="calculated" />}
       {operators.map((operator) => (
         <Result key={operator.slug} href={`/operators/${operator.slug}`} label="Operator" title={operator.name} detail={`${operator.wallet_count} registry claims across ${operator.chains.join(", ") || "no indexed chains"}.`} kind="inferred" confidence={operator.wallets?.[0]?.confidence} status={operator.wallets?.[0]?.evidence_status} />
@@ -57,7 +57,7 @@ function Result({ href, label, title, detail, kind, confidence, status }: { href
 }
 
 function EmptySearch() {
-  return <div className="grid gap-px bg-ink-700 sm:grid-cols-3"><Example title="Operator" value="Stake" /><Example title="Wallet" value="0x974c...c400" /><Example title="Transaction" value="0x + 64 hex characters" /></div>;
+  return <div className="grid gap-px bg-ink-700 sm:grid-cols-3"><Example title="Operator" value="Stake" /><Example title="Wallet" value="Paste a complete 0x address" /><Example title="Transaction" value="Open from the transfer feed" /></div>;
 }
 
 function Example({ title, value }: { title: string; value: string }) {

@@ -6,17 +6,17 @@ const config: Config = {
     extend: {
       colors: {
         ink: {
-          950: '#05070d',
-          900: '#0a0e18',
-          800: '#0f1524',
-          700: '#1a2236',
-          600: '#252f47',
+          950: '#f5f3ee',
+          900: '#ffffff',
+          800: '#f1edff',
+          700: '#e3dfeb',
+          600: '#cec8db',
         },
         neon: {
-          green: '#4ade80',
-          red: '#f87171',
-          amber: '#fbbf24',
-          cyan: '#22d3ee',
+          green: '#6f55d9',
+          red: '#df5d67',
+          amber: '#bd792f',
+          cyan: '#7a5ee7',
         },
       },
       fontFamily: {

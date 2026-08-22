@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.attribution import Candidate, _score
 from app.main import app
-from app.wallets import CONFIDENCE_CEILING, CASINOS
+from app.wallets import CONFIDENCE_CEILING, CASINOS, observation_targets
 
 client = TestClient(app)
 
@@ -119,6 +119,32 @@ def test_every_score_explains_itself():
     ):
         _, signals = _score(c)
         assert signals and all(isinstance(s, str) and s for s in signals)
+
+
+def test_stake_explorer_labels_preserve_published_networks():
+    """Stake coverage must retain the chain attached to each source address."""
+    targets = observation_targets(CASINOS["stake"])
+    supplied = [
+        wallet for wallet in targets
+        if wallet.source == "user-supplied block explorer"
+    ]
+
+    assert {wallet.chain for wallet in supplied} == {
+        "ethereum", "solana", "tron", "bsc", "polygon", "bitcoin",
+    }
+    assert next(wallet for wallet in supplied if wallet.address.startswith("G9X7F4")).chain == "solana"
+    assert next(wallet for wallet in supplied if wallet.address.startswith("TZ8Ksz")).chain == "tron"
+    assert next(wallet for wallet in supplied if wallet.address.startswith("bc1qmd")).chain == "bitcoin"
+
+
+def test_yeet_gamstat_cluster_preserves_all_seven_networks():
+    targets = observation_targets(CASINOS["yeet"])
+
+    assert len(targets) == 7
+    assert {wallet.chain for wallet in targets} == {
+        "ethereum", "tron", "solana", "polygon", "bsc", "base", "arbitrum",
+    }
+    assert all(wallet.source == "https://gamstat.io/casinos/yeet" for wallet in targets)
 
 
 # ── Endpoint contract ────────────────────────────────────────────────────────

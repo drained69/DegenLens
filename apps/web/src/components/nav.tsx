@@ -2,19 +2,28 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BrandLockup } from "@/components/logo";
 
-const links = [
-  { href: "/", label: "Intelligence" },
-  { href: "/market", label: "Market" },
-  { href: "/operators", label: "Directory" },
-  { href: "/flows", label: "Flows" },
-  { href: "/players", label: "Players" },
-  { href: "/wallet", label: "Wallets" },
-  { href: "/search", label: "Investigate" },
-  { href: "/ask", label: "Ask" },
-  { href: "/integration", label: "Telegraph" },
+const groups = [
+  {
+    label: "Intelligence",
+    links: [
+      { href: "/", label: "Overview", code: "01" },
+      { href: "/operators", label: "Operators", code: "02" },
+      { href: "/players", label: "Players", code: "03" },
+      { href: "/wallet", label: "Wallets", code: "04" },
+      { href: "/market", label: "Market", code: "05" },
+    ],
+  },
+  {
+    label: "Investigate",
+    links: [
+      { href: "/search", label: "Universal search", code: "06" },
+      { href: "/flows", label: "Transaction feed", code: "07" },
+      { href: "/ask", label: "Query intelligence", code: "08" },
+    ],
+  },
 ];
 
 function isActive(pathname: string, href: string) {
@@ -25,127 +34,81 @@ function isActive(pathname: string, href: string) {
 export function Nav() {
   const pathname = usePathname() ?? "/";
   const [open, setOpen] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   return (
-    <header className="sticky top-0 z-40 border-b border-ink-700/80 bg-ink-950/85 backdrop-blur-md">
-      <div className="mx-auto flex max-w-[1440px] items-center gap-4 px-4 py-3 sm:px-6 lg:px-8">
-        <Link
-          href="/"
-          aria-label="DegenLens home"
-          className="shrink-0 focus-visible:outline-none"
-          onClick={() => setOpen(false)}
-        >
+    <>
+      <header className="terminal-mobile-header">
+        <Link href="/" aria-label="DegenLens home" onClick={() => setOpen(false)}>
           <BrandLockup />
         </Link>
-
-        <form
-          action="/search"
-          className="hidden min-w-0 flex-1 items-stretch border border-ink-700 bg-ink-900/80 sm:flex lg:max-w-[420px]"
-        >
-          <label htmlFor="global-search" className="sr-only">
-            Search entities
-          </label>
-          <input
-            id="global-search"
-            name="q"
-            placeholder="Operator, 0x address, tx hash"
-            className="min-w-0 flex-1 bg-transparent px-3 py-2 font-mono text-xs text-white placeholder:text-slate-600 focus:outline-none"
-          />
-          <button
-            type="submit"
-            className="border-l border-ink-700 px-3 font-mono text-[10px] uppercase tracking-wider text-neon-cyan transition hover:bg-ink-800"
-          >
-            Search
-          </button>
-        </form>
-
-        <div className="ml-auto flex shrink-0 items-center gap-3">
-          <div className="hidden items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-slate-500 lg:flex">
-            <span className="live-dot bg-neon-green" />
-            <span className="text-neon-green">index live</span>
-          </div>
+        <div className="ml-auto flex items-center gap-3">
+          <span className="live-dot bg-neon-green" aria-hidden="true" />
           <button
             type="button"
-            className="border border-neon-cyan/50 bg-neon-cyan/10 px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-neon-cyan lg:hidden"
+            className="terminal-menu-button"
             aria-expanded={open}
-            aria-controls="mobile-nav"
+            aria-controls="terminal-navigation"
             onClick={() => setOpen((value) => !value)}
           >
             {open ? "Close" : "Menu"}
           </button>
         </div>
-      </div>
+      </header>
 
-      <nav
-        aria-label="Primary"
-        className="hidden border-t border-ink-800/80 lg:block"
-      >
-        <div className="mx-auto flex max-w-[1440px] items-center gap-0.5 overflow-x-auto px-4 sm:px-6 lg:px-8">
-          {links.map((l) => {
-            const active = isActive(pathname, l.href);
-            return (
-              <Link
-                key={l.href}
-                href={l.href}
-                aria-current={active ? "page" : undefined}
-                className={`relative whitespace-nowrap px-3 py-2.5 font-mono text-[11px] uppercase tracking-[0.12em] transition ${
-                  active
-                    ? "text-white"
-                    : "text-slate-500 hover:text-white"
-                }`}
-              >
-                {l.label}
-                {active ? (
-                  <span className="absolute inset-x-2 bottom-0 h-px bg-neon-green shadow-[0_0_8px_rgba(74,222,128,0.7)]" />
-                ) : null}
-              </Link>
-            );
-          })}
+      <aside id="terminal-navigation" className={`terminal-sidebar ${open ? "is-open" : ""}`}>
+        <div className="terminal-brand">
+          <Link href="/" aria-label="DegenLens home" onClick={() => setOpen(false)}>
+            <BrandLockup />
+          </Link>
+          <span className="terminal-edition">INTELLIGENCE OS / 01</span>
         </div>
-      </nav>
 
-      {open ? (
-        <div
-          id="mobile-nav"
-          className="border-t border-ink-700 bg-ink-950 lg:hidden"
-        >
-          <form action="/search" className="flex border-b border-ink-700 sm:hidden">
-            <label htmlFor="mobile-search" className="sr-only">
-              Search entities
-            </label>
-            <input
-              id="mobile-search"
-              name="q"
-              placeholder="Operator, 0x, tx hash"
-              className="min-w-0 flex-1 bg-transparent px-4 py-3 font-mono text-xs text-white placeholder:text-slate-600 focus:outline-none"
-            />
-            <button
-              type="submit"
-              className="border-l border-ink-700 px-4 font-mono text-[10px] uppercase text-neon-cyan"
-            >
-              Search
-            </button>
-          </form>
-          <nav aria-label="Mobile" className="grid">
-            {links.map((l) => {
-              const active = isActive(pathname, l.href);
-              return (
-                <Link
-                  key={l.href}
-                  href={l.href}
-                  onClick={() => setOpen(false)}
-                  aria-current={active ? "page" : undefined}
-                  className={`border-b border-ink-800 px-4 py-3 font-mono text-xs uppercase tracking-[0.14em] ${
-                    active ? "bg-ink-900 text-white" : "text-slate-400"
-                  }`}
-                >
-                  {l.label}
-                </Link>
-              );
-            })}
-          </nav>
-        </div>
-      ) : null}
-    </header>
+        <form action="/search" className="terminal-quick-search">
+          <label htmlFor="side-search" className="sr-only">Search intelligence</label>
+          <span aria-hidden="true">⌕</span>
+          <input ref={searchRef} id="side-search" name="q" placeholder="Search or paste hash" />
+          <kbd className="hidden sm:inline">⌘K</kbd>
+        </form>
+
+        <nav aria-label="Primary" className="terminal-nav-groups">
+          {groups.map((group) => (
+            <div key={group.label} className="terminal-nav-group">
+              <div className="terminal-nav-label">{group.label}</div>
+              {group.links.map((link) => {
+                const active = isActive(pathname, link.href);
+                return (
+                  <Link
+                    key={link.href}
+                    href={link.href}
+                    aria-current={active ? "page" : undefined}
+                    onClick={() => setOpen(false)}
+                    className={`terminal-nav-link ${active ? "is-active" : ""}`}
+                  >
+                    <span className="terminal-nav-code">{link.code}</span>
+                    <span>{link.label}</span>
+                    {active ? <span className="terminal-nav-marker" /> : null}
+                  </Link>
+                );
+              })}
+            </div>
+          ))}
+        </nav>
+
+      </aside>
+      {open ? <button className="terminal-nav-scrim" aria-label="Close navigation" onClick={() => setOpen(false)} /> : null}
+    </>
   );
 }

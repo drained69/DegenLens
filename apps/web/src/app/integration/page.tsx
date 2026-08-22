@@ -1,5 +1,5 @@
 import { Panel } from "@/components/panel";
-import { telegraphNodeUrl } from "@/lib/telegraph";
+import { telegraphMinerId, telegraphNodeUrl, telegraphPaymentConfigured } from "@/lib/telegraph";
 
 export const revalidate = 300;
 
@@ -60,7 +60,7 @@ export default async function IntegrationPage() {
           Telegraph Integration
         </h1>
         <p className="mt-1 text-sm text-slate-400">
-          Live network state, declared intents, and registration readiness for DegenMiner.
+          Telegraph discovery, x402 readiness, miner routing, and registration state for DegenLens.
         </p>
       </div>
 
@@ -71,12 +71,22 @@ export default async function IntegrationPage() {
         <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
           <Row label="Engine node" value={telegraphNodeUrl} mono />
           <Row
+            label="Direct routing"
+            value={telegraphMinerId === "local" ? "local development miner" : `Telegraph miner #${telegraphMinerId}`}
+            tone={telegraphMinerId === "local" ? "warn" : "ok"}
+          />
+          <Row
+            label="x402 payments"
+            value={telegraphPaymentConfigured ? "configured" : "not configured"}
+            tone={telegraphPaymentConfigured ? "ok" : "warn"}
+          />
+          <Row
             label="Canonical intents"
             value={intents ? `${intents.length} discovered` : "unreachable"}
             tone={intents ? "ok" : "bad"}
           />
           <Row
-            label="Local miner"
+            label="Miner service"
             value={
               miner
                 ? `${miner.health.status} · ${miner.health.data_mode} mode`
@@ -98,7 +108,7 @@ export default async function IntegrationPage() {
         </dl>
         {!miner && (
           <p className="mt-4 border border-ink-700 bg-ink-800/60 px-4 py-3 text-xs text-slate-400">
-            Start the miner with{" "}
+            For local development, start the miner with{" "}
             <code className="bg-ink-900 px-1.5 py-0.5 font-mono text-neon-cyan">
               pnpm miner:dev
             </code>{" "}
@@ -196,18 +206,18 @@ export default async function IntegrationPage() {
             mapping is not required. The floor price is set in the registration transaction.
           </Step>
           <Step n={3}>
-            <strong className="text-white">Deploy to a public HTTPS URL</strong> and set it
-            as <code className="font-mono">base_url</code> — the production API endpoint
-            Telegraph routes to, not the project website.
+            <strong className="text-white">Verify the public HTTPS API</strong> at the
+            manifest <code className="font-mono">base_url</code>, including every declared
+            endpoint and the shared confidence, verdict, reasoning contract.
           </Step>
           <Step n={4}>
             <strong className="text-white">Import &amp; Upload.</strong> Paste the YAML into
             the developer console; it parses the values and pins to IPFS via Pinata.
           </Step>
           <Step n={5}>
-            <strong className="text-white">Register.</strong> Submit the IPFS hash to the
-            registry contract on Base Sepolia. Gas only, no bond — but registration is
-            immutable, so validate first.
+            <strong className="text-white">Register.</strong> Submit the hosted YAML URL,
+            SHA-256 hash, fee address, floor price, and live canonical intents to the
+            registry contract on Base Sepolia.
           </Step>
         </ol>
       </Panel>

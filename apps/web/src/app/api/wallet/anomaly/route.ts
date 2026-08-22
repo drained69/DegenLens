@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { telegraph } from '@/lib/telegraph';
+import { telegraph, telegraphMinerId } from '@/lib/telegraph';
 import type { AnomalyReport } from '@degenlens/shared';
 
 export async function GET(req: Request) {
@@ -10,7 +10,7 @@ export async function GET(req: Request) {
   const hours = parseInt(url.searchParams.get('hours') ?? '24', 10);
   try {
     const res = await telegraph.askDirect<AnomalyReport>(
-      'local',
+      telegraphMinerId,
       '/anomaly/check',
       { address, chain, hours },
       'POST',

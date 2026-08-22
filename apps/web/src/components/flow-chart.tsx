@@ -70,7 +70,13 @@ export function FlowChart({ series }: { series: FlowPoint[] }) {
 export function ShareBar({
   rows,
 }: {
-  rows: { label: string; pct: number; usd: number; accent?: string }[];
+  rows: {
+    label: string;
+    pct: number;
+    usd: number;
+    accent?: string;
+    status?: "observed" | "queried_zero" | "unavailable" | "not_registered";
+  }[];
 }) {
   return (
     <div className="space-y-3">
@@ -79,14 +85,19 @@ export function ShareBar({
           <div className="flex items-baseline justify-between text-sm">
             <span className="font-medium text-white">{r.label}</span>
             <span className="font-mono text-xs text-slate-400">
-              {formatUsd(r.usd)}{" "}
-              <span className="text-slate-600">· {r.pct.toFixed(1)}%</span>
+              {r.status === "unavailable"
+                ? <span className="text-neon-amber">N/A · read unavailable</span>
+                : r.status === "not_registered"
+                  ? <span className="text-slate-500">Not registered by source</span>
+                : r.status === "queried_zero"
+                  ? <span className="text-slate-500">No observed flow for registered wallets</span>
+                  : <>{formatUsd(r.usd)}{" "}<span className="text-slate-600">· {r.pct.toFixed(1)}%</span></>}
             </span>
           </div>
           <div className="mt-1.5 h-1.5 w-full bg-ink-800">
             <div
               className={r.accent ?? "bg-neon-cyan"}
-              style={{ height: "100%", width: `${Math.min(r.pct, 100)}%` }}
+              style={{ height: "100%", width: `${r.status === "unavailable" ? 0 : Math.min(r.pct, 100)}%` }}
             />
           </div>
         </div>

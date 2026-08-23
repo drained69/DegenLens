@@ -21,6 +21,10 @@ cargo build --release --target wasm32-unknown-unknown
 ls -lh target/wasm32-unknown-unknown/release/degenlens_scorer.wasm
 ```
 
+From the repository root, `pnpm scorer:verify` builds the exact
+`wasm32-unknown-unknown` artifact and, when `wasm-tools` is installed, checks
+that it has no imports and exports `alloc`, `dealloc`, and `rank_answer`.
+
 Compiled `.wasm` should be well under 200KB (target: 32MB max per the Telegraph spec).
 
 ## Test

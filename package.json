@@ -16,6 +16,7 @@
     "e2e:x402": "pnpm --filter web exec node scripts/e2e-x402.mjs",
     "miner:dev": "cd packages/miner && ../../.venv/bin/uvicorn app.main:app --reload --port 8787",
     "scorer:build": "cd packages/scorer && cargo build --release --target wasm32-unknown-unknown",
+    "scorer:verify": "cd packages/scorer && ./scripts/verify-wasm.sh",
     "scorer:test": "cd packages/scorer && cargo test"
   },
   "engines": {

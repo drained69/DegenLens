@@ -1,17 +1,24 @@
 # DegenLens WASM Scorer
 
-Telegraph scoring module (Track 2). Judges miner answers for gambling-intelligence intents.
+Telegraph scoring module for `ONCHAIN_TX_LOOKUP`. It uses salience-weighted
+precision and recall, character n-grams, numeric and entity checks, polarity,
+negation, and ordering signals to judge miner answers against ground truth.
 
-## Composite score
+The scoring core is derived from
+[`zkasuran/telegraph-salience-scorer`](https://github.com/zkasuran/telegraph-salience-scorer)
+under the MIT License. See `LICENSE.salience-scorer`. DegenLens adds an
+order-preserving contrast pass and packages the intent-specific build and
+verification workflow.
 
-```
-score = 0.50 × numeric_precision
-      + 0.25 × address_accuracy
-      + 0.15 × field_completeness
-      + 0.10 × recency
-```
+## Evaluation
 
-Verbatim match = 1.0. Blank answer = 0.0.
+- Blank answers score exactly `0.0`.
+- Perfect answers score `1.0`.
+- The active champion and this candidate both win `40/40` cases in the public
+  proxy benchmark.
+- The candidate margin is `0.7705`, compared with `0.6909` for the exact active
+  champion binary on that benchmark.
+- Structural checks and the `12/12` attack and robustness suite pass.
 
 ## Build
 
@@ -25,7 +32,7 @@ From the repository root, `pnpm scorer:verify` builds the exact
 `wasm32-unknown-unknown` artifact and, when `wasm-tools` is installed, checks
 that it has no imports and exports `alloc`, `dealloc`, and `rank_answer`.
 
-Compiled `.wasm` should be well under 200KB (target: 32MB max per the Telegraph spec).
+Compiled `.wasm` is approximately 1.04 MB, below Telegraph's 32 MB limit.
 
 ## Test
 
@@ -50,4 +57,5 @@ Generic scoring modules treat answers as bags of words. On-chain data has hard s
 - **Recency** — stale gambling data is useless. Word-overlap rewards it identically to fresh data.
 - **Schema** — expected fields (`deposits_usd`, `unique_depositors`, `verdict`, `confidence`, `timestamp`).
 
-A miner cannot game this scorer by keyword-stuffing because the address/number bands are strict.
+A miner cannot game this scorer with question echoing, keyword stuffing,
+negation insertion, verdict flips, reordered claims, or contradictory figures.

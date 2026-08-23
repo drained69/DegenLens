@@ -6,7 +6,7 @@ description = "WASM scoring module for on-chain gambling intelligence miners"
 license = "MIT"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [profile.release]
 lto = true

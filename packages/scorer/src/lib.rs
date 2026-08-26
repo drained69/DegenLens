@@ -62,7 +62,7 @@ const B_AGREE: f32 = 0.35;
 /// far more than one that is simply off topic. The gradation is the point: a scorer
 /// that flattens every kind of bad answer to zero cannot rank real traffic.
 const M_NUM_MISS_BASE: f32 = 0.35;
-const M_NUM_WRONG: f32 = 0.2;
+const M_NUM_WRONG: f32 = 0.17;
 /// Same words, no shared adjacency.
 const M_ORDER: f32 = 0.55;
 /// Word-list detection: how many content words an answer must have before absence of
@@ -90,7 +90,7 @@ const M_ENT_SWAP: f32 = 0.15;
 /// same name, but an address is a single exact string and a near miss is a different
 /// account entirely.
 const M_ID_MISS: f32 = 0.55;
-const M_ID_WRONG: f32 = 0.06;
+const M_ID_WRONG: f32 = 0.045;
 /// How much of the score a negated match costs. "No rain is expected" covers every
 /// content word of "rain is expected" and asserts the opposite, so coverage that only
 /// holds under a negation the ground truth does not carry is worth less than nothing.

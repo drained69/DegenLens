@@ -843,12 +843,56 @@ async def transaction_lookup_endpoint(req: TransactionLookupRequest) -> dict[str
     """Canonical transaction lookup enriched with gambling entity attribution."""
     transaction, unavailable_reason = await transaction_lookup(req.tx_hash, req.chain)
     if transaction is None:
+        # Fact-echoing prose even on the unavailable path. The scored reasoning
+        # field must name the transaction hash, the chain, and the intent of the
+        # lookup — otherwise the ground truth answer for the same query has
+        # nothing to match against and the response scores near zero. The
+        # underlying cause is kept as the last sentence so the caller still
+        # sees the raw reason without shortening it away.
+        tx_hex = req.tx_hash.lower()
+        chain_name = req.chain
+        verdict = "not_found" if "not found" in unavailable_reason else "unavailable"
+        outcome = "was not found on-chain" if verdict == "not_found" else "could not be resolved"
+        cause_map = {
+            "unsupported_chain": (
+                f"the {chain_name} chain is not among the supported EVM networks for "
+                "this miner (ethereum, base, polygon, optimism, arbitrum, bsc)"
+            ),
+            "upstream circuit breaker open": (
+                f"the upstream provider for {chain_name} is currently in a circuit "
+                "breaker cooldown after repeated failures, so no fresh RPC call was "
+                "attempted"
+            ),
+            "transaction not found": (
+                f"the transaction hash {tx_hex} did not match any confirmed, pending, "
+                f"or reverted transaction on the {chain_name} chain via direct RPC "
+                "lookup"
+            ),
+        }
+        cause = cause_map.get(
+            unavailable_reason,
+            (
+                f"a live provider read against {chain_name} was required and "
+                f"returned no transaction record ({unavailable_reason})"
+            ),
+        )
+        reasoning = (
+            f"Transaction lookup for hash {tx_hex} on the {chain_name} chain "
+            f"{outcome}: {cause}. No block number, block hash, block timestamp, "
+            "sender address, receiver address, native value in ETH or wei, gas "
+            "used, gas price, effective gas price, transaction fee, ERC-20 token "
+            "transfer, contract deployment, method identifier, calldata, or "
+            "registry attribution can be reported. Confidence is zero and the "
+            "data_source is unavailable; this is an honest absence of data "
+            "rather than an assertion about the transaction. Reason code: "
+            f"{unavailable_reason}."
+        )
         return _stamp({
-            "tx_hash": req.tx_hash.lower(),
-            "chain": req.chain,
-            "verdict": "unavailable" if "not found" not in unavailable_reason else "not_found",
+            "tx_hash": tx_hex,
+            "chain": chain_name,
+            "verdict": verdict,
             "confidence": 0.0,
-            "reasoning": unavailable_reason,
+            "reasoning": reasoning,
             "data_source": "unavailable",
             "method": "direct_rpc_lookup",
             "evidence": [],

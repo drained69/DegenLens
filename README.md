@@ -21,15 +21,32 @@ player deposit, casino revenue, solvency, or fraud.
 
 ## Contents
 
+- [Project status](#project-status)
 - [What a miner is](#what-a-miner-is)
 - [Intent strategy](#intent-strategy)
 - [What DegenMiner serves](#what-degenminer-serves)
 - [Design decisions that protect the score](#design-decisions-that-protect-the-score)
 - [Repository layout](#repository-layout)
 - [Quick start](#quick-start)
+- [Configuration and secrets](#configuration-and-secrets)
 - [Registering on Telegraph](#registering-on-telegraph)
 - [Proving performance](#proving-performance)
 - [License](#license)
+
+---
+
+## Project status
+
+DegenLens is a working local development and Telegraph integration project. The
+miner can run against a deterministic demo feed or live chain data through
+Alchemy. The web application is a separate Next.js client that can call the
+local miner directly during development or a registered Telegraph miner in a
+deployed environment.
+
+The data model is intentionally evidence-aware: observed transfers and derived
+metrics are kept separate from wallet labels and attribution claims. Coverage is
+limited to the configured operator registry and should not be interpreted as a
+complete view of gambling activity.
 
 ---
 
@@ -170,37 +187,65 @@ telegraph/
 │   └── web/                # Product client — directory, market, investigations
 ├── packages/
 │   ├── shared/             # TS types + Telegraph client
-│   └── scorer/             # Rust→WASM scorer (not submitted; kept for reference)
+│   └── scorer/             # Rust→WASM scorers for ONCHAIN_TX_LOOKUP and FRAUD_DETECTION (registered on devnode)
 ```
 
 ---
 
 ## Quick start
 
-**Prerequisites:** Python 3.11+, Node.js 20+ (the `@x402/*` packages need
-WebCrypto, which Node 18 doesn't expose), pnpm.
+**Prerequisites:** Python 3.11+, Node.js 20+, pnpm 9+, and (for the Rust
+scorer only) Rust with the `wasm32-unknown-unknown` target. The `@x402/*`
+packages require the Node 20 runtime used by this repository.
 
 ```bash
-# 1. Miner
-cd packages/miner
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/uvicorn app.main:app --reload --port 8787
+# 1. From the repository root, install JavaScript dependencies.
+pnpm install
+
+# 2. Create the miner environment and install Python dependencies.
+python3 -m venv packages/miner/.venv
+packages/miner/.venv/bin/pip install -r packages/miner/requirements.txt
+
+# 3. Start the miner.
+packages/miner/.venv/bin/uvicorn \
+  --app-dir packages/miner app.main:app --reload --port 8787
 # → http://localhost:8787/docs
 ```
 
-Runs with no API keys — you get the labeled demo feed. Add `ALCHEMY_KEY` and
-`COINGECKO_KEY` to `.env` for live chain data.
+The miner runs without API keys and returns a labeled demo feed. Copy
+`.env.example` to `.env` for the full repository configuration, or
+`packages/miner/.env.example` to `packages/miner/.env` when running the miner
+directly. Add `ALCHEMY_KEY` for live chain data. Set `STRICT_MODE=true` in
+production to reject synthetic responses.
 
 ```bash
-# 2. Tests
-.venv/bin/python -m pytest tests/ -q --asyncio-mode=auto
+# 4. Run the miner tests.
+packages/miner/.venv/bin/python -m pytest packages/miner/tests/ -q --asyncio-mode=auto
 
-# 3. Demo dashboard (optional, from repo root)
-pnpm install
+# 5. In a second terminal, start the web application.
 pnpm --filter web dev
 # → http://localhost:3000
 ```
+
+Useful root scripts include `pnpm build`, `pnpm lint`, `pnpm typecheck`,
+`pnpm scorer:test`, and `pnpm scorer:build`. The root `pnpm miner:dev` shortcut
+expects a repository-root `.venv`; use the explicit command above when using
+the recommended `packages/miner/.venv` location.
+
+## Configuration and secrets
+
+Use environment variables for provider keys, wallet keys, Telegram credentials,
+and deployment configuration. The committed `.env.example` files contain only
+placeholders and are safe to use as templates. Real `.env` files are ignored by
+Git.
+
+Never commit `EVM_PRIVATE_KEY`, `MINER_PRIVATE_KEY`, API keys, seed phrases,
+wallet files, or production credentials. Use a dedicated testnet wallet for
+local x402 and Telegraph registration work. If a key is exposed, revoke or
+rotate it immediately and check the wallet for unauthorized activity.
+
+The web server reads `EVM_PRIVATE_KEY` for server-side x402 payments. Do not
+prefix it with `NEXT_PUBLIC_` and do not import it into browser components.
 
 ---
 

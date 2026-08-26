@@ -31,6 +31,7 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from .market import cached_aggregate, gather_within_budget
 from .onchain import get_observation_transfers, get_transfers
 from .prices import resolve_prices
 from .wallets import CONFIDENCE_CEILING, Casino, attributed_operators, get_casino, observation_targets
@@ -173,7 +174,22 @@ async def _profile(address: str, chain: str, hours: int) -> tuple[set[str], int,
 async def discover_for_operator(
     slug: str, hours: int = 168, max_candidates: int = 10
 ) -> dict:
-    """Propose sibling wallet candidates for one already-attributed operator."""
+    """Propose sibling wallet candidates, served from the aggregate cache.
+
+    Discovery reads the whole cluster and then profiles each shortlisted
+    counterparty — one upstream round trip apiece. That does not fit a request
+    deadline cold, so it uses the same serve-cached / rebuild-behind pattern as
+    the market aggregates.
+    """
+    return await cached_aggregate(
+        ("discover", slug, hours, max_candidates),
+        lambda: _build_discover_for_operator(slug, hours, max_candidates),
+    )
+
+
+async def _build_discover_for_operator(
+    slug: str, hours: int = 168, max_candidates: int = 10
+) -> dict:
     casino: Casino | None = get_casino(slug)
     if not casino or not casino.is_attributed:
         return {
@@ -195,19 +211,27 @@ async def discover_for_operator(
 
     targets = observation_targets(casino)
     seed_pairs = {(w.address.lower(), w.chain) for w in casino.wallets}
-    cluster_sets = await asyncio.gather(
-        *(
-            get_observation_transfers(
-                wallet.address,
-                wallet.chain,
-                hours,
-                seed=(wallet.address.lower(), wallet.chain) in seed_pairs,
-            )
-            for wallet in targets
+    cluster_sets = await gather_within_budget([
+        get_observation_transfers(
+            wallet.address,
+            wallet.chain,
+            hours,
+            seed=(wallet.address.lower(), wallet.chain) in seed_pairs,
         )
-    )
+        for wallet in targets
+    ])
+    clusters_read = sum(1 for tset in cluster_sets if tset is not None)
+    # One price lookup for every symbol across the whole cluster. Resolving per
+    # wallet issued a serial upstream call per wallet, which sat outside the
+    # read budget and pushed the endpoint past the service deadline.
+    prices = await resolve_prices({
+        t.token_symbol
+        for tset in cluster_sets if tset is not None
+        for t in tset.transfers
+    })
     for wallet, tset in zip(targets, cluster_sets):
-        prices = await resolve_prices({t.token_symbol for t in tset.transfers})
+        if tset is None:
+            continue  # missed the budget — a coverage gap, not an empty wallet
         addr = wallet.address.lower()
 
         for t in tset.transfers:
@@ -241,11 +265,15 @@ async def discover_for_operator(
     shortlist = shortlist[: min(max_candidates * 2, MAX_PROFILE_FANOUT)]
 
     candidates: list[Candidate] = []
-    profiles = await asyncio.gather(
-        *(_profile(a, r["chain"], hours) for a, r in shortlist)
+    profiles = await gather_within_budget(
+        [_profile(a, r["chain"], hours) for a, r in shortlist]
     )
 
-    for (addr, rec), (parties, n_transfers, avg_usd) in zip(shortlist, profiles):
+    for (addr, rec), profile in zip(shortlist, profiles):
+        if profile is None:
+            continue  # unprofiled: ranking it on cluster flow alone would
+            # overstate what was actually checked
+        parties, n_transfers, avg_usd = profile
         overlap = (
             len(parties & cluster_counterparties) / len(parties) if parties else 0.0
         )
@@ -278,8 +306,16 @@ async def discover_for_operator(
         "known_clusters": len(casino.wallets),
         "counterparties_examined": len(agg),
         "candidates_shortlisted": len(shortlist),
+        "candidates_profiled": len(candidates),
         "candidates": [c.as_dict() for c in top],
         "max_recommended_confidence": CONFIDENCE_CEILING["curated"],
+        "clusters_read": clusters_read,
+        "clusters_total": len(targets),
+        "coverage_complete": clusters_read == len(targets)
+        and len(candidates) == len(shortlist),
+        # "derived" only once at least one cluster was actually read. With none,
+        # an empty candidate list would look like "we looked and found nothing".
+        "data_source": "derived" if clusters_read else "unavailable",
         "methodology": (
             "Candidates are addresses exchanging material value with an already-"
             "attributed cluster while showing hub behaviour of their own. Ranked by "
@@ -293,6 +329,13 @@ async def discover_for_operator(
 
 async def discover_all(hours: int = 168, per_operator: int = 5) -> dict:
     """Run discovery across every attributed operator."""
+    return await cached_aggregate(
+        ("discover_all", hours, per_operator),
+        lambda: _build_discover_all(hours, per_operator),
+    )
+
+
+async def _build_discover_all(hours: int = 168, per_operator: int = 5) -> dict:
     operators = attributed_operators()
     results = await asyncio.gather(
         *(discover_for_operator(o.slug, hours, per_operator) for o in operators)
@@ -304,12 +347,19 @@ async def discover_all(hours: int = 168, per_operator: int = 5) -> dict:
         for c in r.get("candidates", [])
         if c["strength"] >= 0.7
     )
+    searched = [r for r in results if r.get("data_source") not in (None, "unavailable")]
     return {
         "window_hours": hours,
         "operators_expanded": len(operators),
+        "operators_searched": len(searched),
         "candidates_proposed": total,
         "strong_candidates": strong,
         "by_operator": results,
+        # Same rule as one operator: without a single completed search, an empty
+        # candidate list must not read as "searched and found nothing".
+        "data_source": "derived" if searched else "unavailable",
+        "coverage_complete": len(searched) == len(operators)
+        and all(r.get("coverage_complete") for r in searched),
         "note": (
             f"{total} candidate(s) proposed across {len(operators)} operator(s); "
             f"{strong} rated strong. Every one requires human review before entering "

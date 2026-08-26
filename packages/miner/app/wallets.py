@@ -48,6 +48,15 @@ EVM_CHAINS = set(INDEXED_CHAINS)
 
 EvidenceStatus = Literal["verified", "curated", "unverified_seed"]
 
+# Roles mirror what upstream cluster registries actually distinguish. A wallet
+# that only consolidates balances between an operator's own addresses, or one
+# whose function has not been classified, is not a "hot" wallet — flattening
+# either into "hot" would overstate how much of the observed flow is
+# player-facing.
+WalletRole = Literal[
+    "deposit", "hot", "cold", "treasury", "consolidation", "unknown"
+]
+
 # Confidence ceilings by evidence status. A live RPC read can prove what an
 # address DID; it cannot prove WHOSE address it is. Attribution confidence is
 # therefore capped by label provenance, independent of data freshness.
@@ -62,13 +71,18 @@ CONFIDENCE_CEILING: dict[str, float] = {
 class WalletCluster:
     address: str
     chain: Chain
-    role: Literal["deposit", "hot", "cold", "treasury"]
+    role: WalletRole
     confidence: float
     evidence_status: EvidenceStatus
     evidence: tuple[str, ...] = ()
     last_reviewed: str = "2026-08-17"
     source: str = "unverified"
     discovered_at: str = "2026-08-17T00:00:00+00:00"
+    # The source's own human label for this cluster, when it publishes one.
+    label: str | None = None
+    # The source's own confidence, BEFORE our provenance ceiling is applied.
+    # `confidence` is the capped figure; this is what the source actually said.
+    source_confidence: float | None = None
 
     def __post_init__(self) -> None:
         ceiling = CONFIDENCE_CEILING[self.evidence_status]
@@ -176,22 +190,39 @@ def _gamstat_label(
     explorer_url: str | None = None,
     casino_name: str = "Shuffle",
     source_url: str = "https://gamstat.io/casinos/shuffle",
+    label: str | None = None,
 ) -> WalletCluster:
-    """A Gamstat cluster label; not independently verified here."""
+    """A Gamstat cluster label; not independently verified here.
+
+    Confidence is `min(source_confidence, curated_ceiling)`. The ceiling is a
+    statement about OUR provenance — a label we have not independently
+    confirmed cannot be presented as verified, however sure Gamstat is. The
+    source figure is a statement about THEIRS, and it can only pull the number
+    down. Publishing a wallet Gamstat rates 0.3 at our 0.75 curated ceiling
+    would launder their stated doubt into our confidence, which is exactly the
+    kind of quiet overstatement this registry exists to prevent.
+
+    `source_confidence` is retained verbatim so the ungated figure stays
+    auditable next to the capped one.
+    """
     evidence = [
         f"Gamstat {casino_name} cluster wallet listing; source confidence {source_confidence}",
         "Requires independent explorer/RPC confirmation before verified status",
     ]
+    if label:
+        evidence.append(f"Gamstat wallet label: {label}")
     if explorer_url:
         evidence.append(f"Explorer source: {explorer_url}")
     return WalletCluster(
         address=address,
         chain=chain,
         role=role,  # type: ignore[arg-type]
-        confidence=CONFIDENCE_CEILING["curated"],
+        confidence=min(source_confidence, CONFIDENCE_CEILING["curated"]),
+        source_confidence=source_confidence,
+        label=label,
         evidence_status="curated",
         evidence=tuple(evidence),
-        last_reviewed="2026-08-20",
+        last_reviewed="2026-08-23",
         source=source_url,
         discovered_at="2026-08-20T00:00:00+00:00",
     )
@@ -213,22 +244,35 @@ def _supplied_explorer_label(address: str, chain: Chain, explorer_url: str) -> W
     )
 
 
+# One Gamstat cluster row: address, network, role, their confidence, their label.
+GamstatRow = tuple[str, Chain, str, float, str]
+
+
 def _gamstat_wallets(
     casino_name: str,
     slug: str,
-    labels: tuple[tuple[str, Chain, str], ...],
+    rows: tuple[GamstatRow, ...],
 ) -> tuple[WalletCluster, ...]:
-    """Build chain-specific curated labels from Gamstat's public registry."""
+    """Build chain-specific curated labels from Gamstat's public registry.
+
+    Rows mirror Gamstat's published cluster table one-for-one, including the
+    role and per-wallet confidence it assigns. Roles are NOT normalised to
+    "hot": Gamstat distinguishes cold reserves, consolidation addresses, and
+    unclassified operational wallets, and collapsing those would erase the
+    distinction between a treasury and a payout wallet.
+    """
     source_url = f"https://gamstat.io/casinos/{slug}"
     return tuple(
         _gamstat_label(
             address,
             chain,
             role,
+            source_confidence=source_confidence,
             casino_name=casino_name,
             source_url=source_url,
+            label=label,
         )
-        for address, chain, role in labels
+        for address, chain, role, source_confidence, label in rows
     )
 
 
@@ -236,16 +280,17 @@ ROLLBIT_GAMSTAT_WALLETS = _gamstat_wallets(
     "Rollbit",
     "rollbit",
     (
-        ("0x8ae57a027c63fca8070d1bf38622321de8004c67", "ethereum", "cold"),
-        ("0xef8801eaf234ff82801821ffe2d78d60a0237f97", "ethereum", "hot"),
-        ("0xcbd6832ebc203e49e2b771897067fce3c58575ac", "ethereum", "hot"),
-        ("0x46dca395d20e63cb0fe1edc9f0e6f012e77c0913", "ethereum", "hot"),
-        ("0xcbd6832ebc203e49e2b771897067fce3c58575ac", "polygon", "hot"),
-        ("RBHdGVfDfMjfU6iUfCb1LczMJcQLx7hGnxbzRsoDNvx", "solana", "hot"),
-        ("3Hhh16urMb1fy6mk4jkjYyh4yiRzqyeUNT", "bitcoin", "hot"),
-        ("3MNNwkVDPWeysqKqp2PCMieia5aSQrasms", "bitcoin", "hot"),
-        ("3LHMJGV9nzVN4H714yEUTeXZaju91RVvAH", "bitcoin", "hot"),
-        ("39oL1SZiSJWnCdn7uM5xrjbvE8hFMgPnoa", "bitcoin", "hot"),
+        ("0x8ae57a027c63fca8070d1bf38622321de8004c67", "ethereum", "unknown", 0.6, "Rollbit ops (Rollbot/NFT)"),
+        ("0xef8801eaf234ff82801821ffe2d78d60a0237f97", "ethereum", "hot", 0.9, "Rollbit ERC-20 hot"),
+        ("3Hhh16urMb1fy6mk4jkjYyh4yiRzqyeUNT", "bitcoin", "cold", 0.7, "Cold Wallet"),
+        ("3MNNwkVDPWeysqKqp2PCMieia5aSQrasms", "bitcoin", "cold", 0.7, "Cold Wallet"),
+        ("3LHMJGV9nzVN4H714yEUTeXZaju91RVvAH", "bitcoin", "cold", 0.7, "Cold Wallet"),
+        ("RBHdGVfDfMjfU6iUfCb1LczMJcQLx7hGnxbzRsoDNvx", "solana", "cold", 0.9, "Rollbit SOL treasury"),
+        ("0xcbd6832ebc203e49e2b771897067fce3c58575ac", "ethereum", "hot", 0.9, "Rollbit hot (ETH)"),
+        ("0x46dca395d20e63cb0fe1edc9f0e6f012e77c0913", "ethereum", "unknown", 0.6, "Rollbit ops (rollbit.eth)"),
+        ("3LyMZcfRiFbyYqi63RUpq53nL4gygMTfnU", "bitcoin", "cold", 0.7, "Cold Wallet"),
+        ("39oL1SZiSJWnCdn7uM5xrjbvE8hFMgPnoa", "bitcoin", "cold", 0.7, "Cold Wallet"),
+        ("0xcbd6832ebc203e49e2b771897067fce3c58575ac", "polygon", "hot", 0.6, "Rollbit hot (Polygon)"),
     ),
 )
 
@@ -253,24 +298,24 @@ BCGAME_GAMSTAT_WALLETS = _gamstat_wallets(
     "BC.Game",
     "bc-game",
     (
-        ("JEBRptmAAjqtxg6c4WLQDaZPeEA8RXnW4dVyhvsvZnxQ", "solana", "hot"),
-        ("0xd352e0d71e14c45b719fe31d1eaa13051ede129b", "bsc", "hot"),
-        ("0xa7b9874d15742358fb455dd56f97c6d19ad74f5c", "base", "hot"),
-        ("0x6adc35bbdd759be047d9d28b94f5734a9c0cb563", "polygon", "hot"),
-        ("0xc199feb7ce2b17fa84162ee705ebb35a2f19407d", "ethereum", "hot"),
-        ("0xe7176831c898d585cd999bcee9984a7fa9a6be96", "arbitrum", "hot"),
-        ("0x120a5b1fd4782cd8639e3814781a5d30382e65db", "ethereum", "hot"),
-        ("0x49395574019ae44d46d535215303a09fd596727c", "bsc", "hot"),
-        ("bc1qqpdkczlc78nkss6wspse8rerf8u9eatce3mmk0", "bitcoin", "hot"),
-        ("0x3ba9ea0ffeff9efdd7cb7eafb3ac6788a21b5aa7", "ethereum", "cold"),
-        ("0xf09214d414312980446c5a6133b9c3db5918b7c5", "ethereum", "hot"),
-        ("0x788529118f2a28c60b9de2ba0353f5ee4293e044", "ethereum", "hot"),
-        ("0x41fc802e01bcf85d91e5708b42d41c2eaf01f375", "ethereum", "hot"),
-        ("0xe983fd1798689eee00c0fb77e79b8f372df41060", "ethereum", "hot"),
-        ("0x5472356f1de00bca5d729cfb6419c44b8d4488ab", "ethereum", "hot"),
-        ("0x9d2a0e32633d9be838bfde19d510e6aa6eb202dd", "ethereum", "hot"),
-        ("0x8aaf720bbbcac82c592ac8f6c628bbac1590e079", "ethereum", "hot"),
-        ("TTUM1sLKN5735BdrdsJqLPnYaKESeWQGkB", "tron", "hot"),
+        ("JEBRptmAAjqtxg6c4WLQDaZPeEA8RXnW4dVyhvsvZnxQ", "solana", "hot", 0.9, "Hot Wallet"),
+        ("0xd352e0d71e14c45b719fe31d1eaa13051ede129b", "bsc", "hot", 0.9, "Hot Wallet"),
+        ("0xa7b9874d15742358fb455dd56f97c6d19ad74f5c", "base", "hot", 0.9, "Hot Wallet"),
+        ("0x6adc35bbdd759be047d9d28b94f5734a9c0cb563", "polygon", "hot", 0.9, "Hot Wallet"),
+        ("0xc199feb7ce2b17fa84162ee705ebb35a2f19407d", "ethereum", "hot", 0.9, "Hot Wallet"),
+        ("0xe7176831c898d585cd999bcee9984a7fa9a6be96", "arbitrum", "hot", 0.9, "Hot Wallet"),
+        ("0x120a5b1fd4782cd8639e3814781a5d30382e65db", "ethereum", "hot", 0.9, "Hot Wallet"),
+        ("0x49395574019ae44d46d535215303a09fd596727c", "bsc", "hot", 0.9, "Hot Wallet"),
+        ("bc1qqpdkczlc78nkss6wspse8rerf8u9eatce3mmk0", "bitcoin", "hot", 0.7, "Hot Wallet"),
+        ("0x3ba9ea0ffeff9efdd7cb7eafb3ac6788a21b5aa7", "ethereum", "cold", 0.9, "Cold Wallet"),
+        ("0xf09214d414312980446c5a6133b9c3db5918b7c5", "ethereum", "hot", 0.8, "Hot Wallet (cross-referenced)"),
+        ("0x788529118f2a28c60b9de2ba0353f5ee4293e044", "ethereum", "hot", 0.9, "BC.Game hot 1"),
+        ("0x41fc802e01bcf85d91e5708b42d41c2eaf01f375", "ethereum", "hot", 0.9, "BC.Game hot"),
+        ("0xe983fd1798689eee00c0fb77e79b8f372df41060", "ethereum", "hot", 0.9, "BC.Game hot 4"),
+        ("0x5472356f1de00bca5d729cfb6419c44b8d4488ab", "ethereum", "hot", 0.9, "BC.Game hot 3"),
+        ("0x9d2a0e32633d9be838bfde19d510e6aa6eb202dd", "ethereum", "hot", 0.9, "BC.Game hot 5"),
+        ("0x8aaf720bbbcac82c592ac8f6c628bbac1590e079", "ethereum", "hot", 0.9, "BC.Game hot 2"),
+        ("TTUM1sLKN5735BdrdsJqLPnYaKESeWQGkB", "tron", "hot", 0.9, "Hot Wallet"),
     ),
 )
 
@@ -278,18 +323,18 @@ SHUFFLE_GAMSTAT_WALLETS = _gamstat_wallets(
     "Shuffle",
     "shuffle",
     (
-        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "ethereum", "cold"),
-        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "bsc", "cold"),
-        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "base", "hot"),
-        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "polygon", "hot"),
-        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "arbitrum", "hot"),
-        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "bsc", "hot"),
-        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "ethereum", "hot"),
-        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "polygon", "hot"),
-        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "base", "hot"),
-        ("76iXe9yKFDjGv3HicUVVy8AYxHLC71L1wYa12zaZzHHp", "solana", "hot"),
-        ("Eq9p5iHVbNR4miwmFMkpuPwLLULZmPTxNUPBgLdNrWYy", "solana", "hot"),
-        ("TWGSJz33dNGMhQYhSRLSKKUyFNewh8JEnp", "tron", "hot"),
+        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "ethereum", "cold", 0.9, "Shuffle hot/treasury (ETH)"),
+        ("76iXe9yKFDjGv3HicUVVy8AYxHLC71L1wYa12zaZzHHp", "solana", "hot", 0.9, "Hot Wallet"),
+        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "bsc", "cold", 0.9, "Shuffle hot/treasury (BSC)"),
+        ("TWGSJz33dNGMhQYhSRLSKKUyFNewh8JEnp", "tron", "hot", 0.9, "Hot Wallet"),
+        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "base", "hot", 0.9, "Hot Wallet"),
+        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "polygon", "hot", 0.9, "Hot Wallet"),
+        ("0xdfaa75323fb721e5f29d43859390f62cc4b600b8", "arbitrum", "hot", 0.9, "Hot Wallet"),
+        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "ethereum", "hot", 0.7, "Hot Wallet"),
+        ("Eq9p5iHVbNR4miwmFMkpuPwLLULZmPTxNUPBgLdNrWYy", "solana", "hot", 0.9, "Hot Wallet"),
+        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "bsc", "hot", 0.9, "Hot Wallet"),
+        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "polygon", "hot", 0.9, "Hot Wallet"),
+        ("0x911a978f0cac392079b51db03e6f3027dfe6f96e", "base", "hot", 0.7, "Hot Wallet"),
     ),
 )
 
@@ -297,13 +342,13 @@ YEET_GAMSTAT_WALLETS = _gamstat_wallets(
     "Yeet",
     "yeet",
     (
-        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "ethereum", "hot"),
-        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "polygon", "hot"),
-        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "bsc", "hot"),
-        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "arbitrum", "hot"),
-        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "base", "hot"),
-        ("TPKJ2wzjxASvQZQBmyegQrU1hExL2yvnLN", "tron", "hot"),
-        ("6UxrMpGdiqsncwBawPjxsZtQb3e6nsgYo1pVSbSeNAaE", "solana", "hot"),
+        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "ethereum", "hot", 0.97, "Yeet omnichain hot"),
+        ("TPKJ2wzjxASvQZQBmyegQrU1hExL2yvnLN", "tron", "hot", 0.97, "Yeet hot"),
+        ("6UxrMpGdiqsncwBawPjxsZtQb3e6nsgYo1pVSbSeNAaE", "solana", "hot", 0.97, "Yeet hot"),
+        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "bsc", "hot", 0.97, "Omnichain Hot Wallet"),
+        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "polygon", "hot", 0.9, "Omnichain Hot Wallet"),
+        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "arbitrum", "hot", 0.9, "Omnichain Hot Wallet"),
+        ("0xc55b68e4e97a945b150c0c6865a3cb4c22ccefd4", "base", "hot", 0.9, "Omnichain Hot Wallet"),
     ),
 )
 
@@ -385,6 +430,38 @@ STAKE_CROSS_CHAIN_WALLETS: tuple[WalletCluster, ...] = (
     _cross_chain_activity_label("0xfa500178de024bf43cfa69b7e636a28ab68f2741", "optimism"),
 )
 
+# Gamstat's current Stake page publishes 17 reviewed address/network pairs,
+# each with its own role, label, and source confidence. Keep this
+# source-matched set separate from activity-probe discoveries: the latter are
+# useful review candidates, but including them in production totals increases
+# rate-limit pressure and can double-count a wallet cluster.
+STAKE_GAMSTAT_WALLETS: tuple[WalletCluster, ...] = _gamstat_wallets(
+    "Stake",
+    "stake",
+    (
+        ("0xdf1fc5523f2e5ea4f6dac2eaed3263953a391b0c", "ethereum", "cold", 0.9, "Cold Wallet"),
+        ("0x6872b6630a3afcd3117191a8403c2002e13df7de", "ethereum", "hot", 0.85, "Hot Wallet (cross-referenced)"),
+        ("G9X7F4JzLzbSGMCndiBdWNi5YzZZakmtkdwq7xS3Q3FE", "solana", "cold", 0.9, "Stake SOL treasury"),
+        ("TZ8Ksz21Hk1tQuztCKCUJBRXStCav9uyjM", "tron", "hot", 0.9, "Hot Wallet"),
+        ("0x6872b6630a3afcd3117191a8403c2002e13df7de", "bsc", "hot", 0.85, "Hot Wallet (cross-referenced)"),
+        ("0x6872b6630a3afcd3117191a8403c2002e13df7de", "polygon", "hot", 0.85, "Hot Wallet (cross-referenced)"),
+        ("0xfa500178de024bf43cfa69b7e636a28ab68f2741", "bsc", "hot", 0.9, "Stake BSC hot"),
+        ("0x974caa59e49682cda0ad2bbe82983419a2ecc400", "ethereum", "hot", 0.97, "Stake.com hot wallet"),
+        ("0x787b8840100d9baadd7463f4a73b5ba73b00c6ca", "ethereum", "hot", 0.9, "Stake.com 11"),
+        ("0x019d0706d65c4768ec8081ed7ce41f59eef9b86c", "polygon", "hot", 0.9, "Hot Wallet"),
+        ("0x6e29f75b0350fd0e85ee34a21ef94767b0186996", "ethereum", "cold", 0.9, "Cold Wallet"),
+        ("0xd523794c879d9ec028960a231f866758e405be34", "ethereum", "cold", 0.9, "Cold Wallet (Everstake staking pool)"),
+        ("bc1qmd3nsuw3z7fwr3wt7ac7ydceyeyu2cflft4ltm", "bitcoin", "cold", 0.7, "Cold Wallet"),
+        # Gamstat rates this one 0.3 and marks it with a question mark. The
+        # low source confidence is carried through rather than flattened to
+        # the curated ceiling — see `_gamstat_label`.
+        ("0x019d0706d65c4768ec8081ed7ce41f59eef9b86c", "ethereum", "cold", 0.3, "Stake cold/reserve?"),
+        ("0xdebfbe80c8aeba98a32968278463ccb639c6c4e3", "ethereum", "hot", 0.9, "Stake.com 2 (retired)"),
+        ("0x0392b64b8bfda184f0a72ce37d73dc7df978c4f7", "ethereum", "consolidation", 0.9, "Stake.com 8"),
+        ("0xb04c0eb29c72cebc467b9d4944d29116fa02c44a", "ethereum", "hot", 0.9, "Stake.com 4"),
+    ),
+)
+
 
 # ── Operator catalog ─────────────────────────────────────────────────────────
 # Operator identity fields (name, site) are public facts. Wallet attribution is
@@ -397,7 +474,7 @@ CASINOS: dict[str, Casino] = {
         website="https://stake.com",
         licensed_in="Curaçao",
         established=2017,
-        wallets=(
+        legacy_wallets=(
             _supplied_explorer_label(
                 "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
                 "ethereum",
@@ -492,6 +569,7 @@ CASINOS: dict[str, Casino] = {
             ),
             *STAKE_CROSS_CHAIN_WALLETS,
         ),
+        wallets=STAKE_GAMSTAT_WALLETS,
     ),
     "rollbit": Casino(
         slug="rollbit",

@@ -25,7 +25,7 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from .market import collect_flows, _worst
+from .market import cached_aggregate, collect_flows, coverage_fields
 from .wallets import attributed_operators
 
 # Behavioural thresholds separating a rail from an end user.
@@ -109,6 +109,18 @@ def _classify(
 
 
 async def provider_activity(hours: int = 168, limit: int = 25) -> dict:
+    """Rank infrastructure providers by casino flow carried, served from cache.
+
+    This reads DOUBLE the requested window to derive trend, so it is the most
+    expensive aggregate in the miner — the one that least belongs on the
+    request path.
+    """
+    return await cached_aggregate(
+        ("providers", hours, limit), lambda: _build_provider_activity(hours, limit)
+    )
+
+
+async def _build_provider_activity(hours: int = 168, limit: int = 25) -> dict:
     """Rank infrastructure providers by casino flow carried, with trend.
 
     Trend compares the requested window against the window immediately before
@@ -220,8 +232,7 @@ async def provider_activity(hours: int = 168, limit: int = 25) -> dict:
         "rails_identified": sum(1 for r in rails if r["category"] != "unidentified"),
         "rails_total": len(rails),
         "total_rail_flow_usd": round(total if rails else 0.0, 2),
-        "data_source": _worst([f.data_source for f in flows]),
-        "coverage_complete": all(f.complete for f in flows),
+        **coverage_fields(flows),
         "scope": (
             "Infrastructure providers — the bridges, exchanges, and routing contracts "
             "that move value in and out of operator wallets. NOT game providers: a "

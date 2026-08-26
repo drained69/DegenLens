@@ -7,11 +7,15 @@ truncated windows are reported rather than silently presented as complete.
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app import market
 from app.main import app
+from app.settings import settings
 from app.wallets import CONFIDENCE_CEILING, attributed_operators, catalog
 
 client = TestClient(app)
@@ -183,6 +187,37 @@ def test_window_params_are_clamped_not_rejected():
     assert client.get("/operator/stake/series?hours=0").json()["window_hours"] == 1
 
 
+@pytest.mark.asyncio
+async def test_treasury_total_includes_every_registered_chain(monkeypatch):
+    """A chain with a non-EVM adapter must contribute to the USD total."""
+    from app.onchain import TokenBalance
+    from app.wallets import get_casino, observation_targets
+
+    casino = get_casino("stake")
+    assert casino is not None
+    targets = observation_targets(casino)
+    values = {chain: float(index + 1) for index, chain in enumerate(casino.queried_chains)}
+
+    async def fake_native(address, chain):
+        return values[chain], "live"
+
+    async def fake_tokens(address, chain):
+        return [TokenBalance("contract", "USDC", 6, 1_000_000, 1.0)], "live"
+
+    async def fake_prices(symbols):
+        return {symbol: 1.0 for symbol in symbols}
+
+    monkeypatch.setattr("app.onchain.native_balance", fake_native)
+    monkeypatch.setattr("app.onchain.token_balances", fake_tokens)
+    monkeypatch.setattr("app.market.resolve_prices", fake_prices)
+
+    result = await market.operator_treasury("stake")
+    expected = sum(values[w.chain] + 1.0 for w in targets)
+    assert result["total_usd"] == pytest.approx(expected)
+    assert result["coverage_complete"] is True
+    assert set(result["chains_complete"]) == set(casino.queried_chains)
+
+
 def test_flow_confidence_is_capped_by_attribution_uncertainty():
     """Even perfect chain reads cannot exceed the attribution ceiling."""
     from app.main import _flow_confidence
@@ -235,3 +270,170 @@ def test_no_endpoint_returns_an_internal_error():
         body = client.get(f"{path}?hours=24").json()
         if isinstance(body, dict):
             assert body.get("error") is None, f"{path} raised {body.get('error')}"
+
+
+# ── Deadline behaviour ───────────────────────────────────────────────────────
+#
+# Four aggregate endpoints once hard-failed at 100% error rate, pinned to the
+# caller's 20s ceiling. Two independent defects produced that, and both are
+# pinned below: the fan-out had no wall-clock bound, and the service deadline
+# could be computed but never *delivered*.
+
+
+@pytest.mark.asyncio
+async def test_collect_flows_reports_slow_operators_as_unread_not_zero(monkeypatch):
+    """An operator dropped at the budget must never look like a quiet one."""
+    operators = attributed_operators()[:2]
+    assert len(operators) == 2, "test needs two attributed operators"
+    slow, quick = operators
+
+    async def fake_collect_flow(casino, hours):
+        if casino.slug == slow.slug:
+            await asyncio.sleep(30)
+        return market.OperatorFlow(
+            casino=casino, transfers=[], prices={}, data_source="live", complete=True
+        )
+
+    monkeypatch.setattr(market, "collect_flow", fake_collect_flow)
+    monkeypatch.setattr(market.settings, "flow_budget_s", 0.1)
+
+    started = time.perf_counter()
+    flows = await market.collect_flows(operators, 24)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 5, f"collect_flows ignored its budget ({elapsed:.1f}s)"
+
+    by_slug = {f.casino.slug: f for f in flows}
+    assert by_slug[quick.slug].data_source == "live"
+    assert by_slug[slow.slug].data_source == market.UNREAD_SOURCE
+    assert by_slug[slow.slug].complete is False
+    assert by_slug[slow.slug].transfers == []
+
+    coverage = market.coverage_fields(flows)
+    assert coverage["coverage_complete"] is False
+    assert coverage["operators_unread"] == 1
+    assert coverage["unread_operators"] == [slow.slug]
+    # A partial read is still a truthful statement about observed flow, so the
+    # readable operator must not be downgraded to an outage.
+    assert coverage["data_source"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_collect_flows_reports_unavailable_when_nothing_was_read(monkeypatch):
+    """If every operator misses the budget, there is nothing to report."""
+    operators = attributed_operators()[:2]
+
+    async def never(casino, hours):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(market, "collect_flow", never)
+    monkeypatch.setattr(market.settings, "flow_budget_s", 0.1)
+
+    coverage = market.coverage_fields(await market.collect_flows(operators, 24))
+    assert coverage["data_source"] == "unavailable"
+    assert coverage["operators_read"] == 0
+    assert coverage["coverage_complete"] is False
+
+
+def test_slow_handler_is_answered_at_the_deadline_not_the_caller_ceiling(monkeypatch):
+    """The service deadline must bound wall-clock delivery, not just fire.
+
+    Under BaseHTTPMiddleware an `asyncio.wait_for` around `call_next` produced
+    the right payload at the right time but withheld it until the abandoned
+    handler finished, so every aggregate request ran to the caller's ceiling.
+    """
+    async def crawl(hours=168):
+        await asyncio.sleep(30)
+        raise AssertionError("handler should have been cancelled")
+
+    monkeypatch.setattr(market, "network_distribution", crawl)
+
+    started = time.perf_counter()
+    r = client.get("/market/networks?hours=24")
+    elapsed = time.perf_counter() - started
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["verdict"] == "unavailable"
+    assert body["error"] == "request_timeout"
+    assert body["confidence"] == 0.0
+    assert body["data_source"] == "unavailable"
+    assert body["coverage_complete"] is False
+    assert elapsed < 30, (
+        f"response withheld for {elapsed:.1f}s despite a "
+        f"{settings.request_timeout_s:g}s deadline"
+    )
+
+
+# ── Aggregate cache ──────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def _clear_aggregates():
+    market._AGGREGATE_CACHE.clear()
+    market._AGGREGATE_TASKS.clear()
+    yield
+    market._AGGREGATE_CACHE.clear()
+    market._AGGREGATE_TASKS.clear()
+
+
+@pytest.mark.asyncio
+async def test_usable_aggregate_is_cached_and_reused(_clear_aggregates):
+    """A completed read is served from cache instead of re-read."""
+    calls = []
+
+    async def build():
+        calls.append(1)
+        return {"data_source": "live", "coverage_complete": True, "chains": []}
+
+    first = await market.cached_aggregate(("t", 1), build)
+    second = await market.cached_aggregate(("t", 1), build)
+
+    assert first == second
+    assert len(calls) == 1, "cached aggregate was rebuilt on the second call"
+    assert "pending_first_read" not in second
+
+
+@pytest.mark.asyncio
+async def test_cold_aggregate_is_marked_pending_not_presented_as_a_reading(
+    _clear_aggregates, monkeypatch
+):
+    """An empty answer must never look like an observed zero."""
+    # live_data_available is derived from the key, so clear the key.
+    monkeypatch.setattr(market.settings, "alchemy_key", "")
+
+    async def build():
+        return {"data_source": "unavailable", "coverage_complete": False, "chains": []}
+
+    result = await market.cached_aggregate(("t", 2), build)
+    assert result["pending_first_read"] is True
+    assert result["data_source"] == "unavailable"
+    assert "in progress" in result["caveat"]
+
+
+@pytest.mark.asyncio
+async def test_expired_aggregate_serves_stale_data_flagged_as_stale(_clear_aggregates):
+    """After the TTL, a real prior reading beats an empty one — but says so."""
+    good = {"data_source": "live", "coverage_complete": True, "total_inbound_usd": 42.0}
+    market._AGGREGATE_CACHE[("t", 3)] = (good, time.monotonic() - 1)
+
+    async def build():
+        return {"data_source": "unavailable", "coverage_complete": False}
+
+    result = await market.cached_aggregate(("t", 3), build)
+    assert result["stale"] is True
+    assert result["coverage_complete"] is False
+    assert result["total_inbound_usd"] == 42.0
+    assert "refresh is in progress" in result["caveat"]
+
+
+@pytest.mark.asyncio
+async def test_error_results_are_terminal_and_never_queued_for_rebuild(_clear_aggregates):
+    """An unknown slug can never succeed, so it must not schedule a rebuild."""
+    async def build():
+        return {"error": "no attributed operator matched", "assets": []}
+
+    result = await market.cached_aggregate(("t", 4), build)
+    assert result["error"]
+    assert ("t", 4) not in market._AGGREGATE_TASKS
+    assert ("t", 4) not in market._AGGREGATE_CACHE

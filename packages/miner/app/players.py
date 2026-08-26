@@ -39,9 +39,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .market import collect_flows, _worst
-from .onchain import get_transfers
+from .market import cached_aggregate, collect_flows, coverage_fields
+from .onchain import get_transfers, page_budget
 from .prices import resolve_prices
+from .settings import settings
 from .wallets import attributed_operators, resolve_wallet
 
 # An address moving through this many distinct operators, or at this scale, is
@@ -224,7 +225,42 @@ async def evaluate_player(
     # own treasury as a "player" would be a category error.
     claim = resolve_wallet(address)
 
-    tset = await get_transfers(address, chain, hours)
+    if claim:
+        # A registered operator cluster is answered from the REGISTRY, with no
+        # chain read at all. The classification below already overrode whatever
+        # the transfers said, so the read only ever produced flow figures — and
+        # an operator's own treasury has no "net player position" to report.
+        # These are also the busiest addresses in the registry, so reading them
+        # was simultaneously the most expensive path and the one whose numbers
+        # were discarded.
+        return PlayerProfile(
+            address=address,
+            chain=chain,
+            window_hours=hours,
+            sent_to_operators_usd=0.0,
+            received_from_operators_usd=0.0,
+            net_position_usd=0.0,
+            transfers_with_operators=0,
+            operators_touched=0,
+            entity_class="operator_wallet",
+            classification_reasons=[
+                f"address is itself an attributed {claim[0].name} cluster "
+                f"({claim[1].evidence_status})"
+            ],
+            is_operator_wallet=True,
+            operator_label=claim[0].name,
+            data_source="registry",
+            coverage_complete=True,
+        )
+
+    # An arbitrary address cannot be pre-warmed the way the registry-wide
+    # aggregates are, so this read has to fit the request deadline on its own.
+    # A busy wallet over a 720h window does not, and an over-deadline read is
+    # never cached — so every call re-paid for a result no caller ever saw.
+    # Bounding the depth returns a partial, cacheable answer instead; the
+    # truncation surfaces through coverage_complete.
+    with page_budget(settings.request_page_budget):
+        tset = await get_transfers(address, chain, hours)
     prices = await resolve_prices({t.token_symbol for t in tset.transfers})
 
     # Map every attributed cluster address to its operator.
@@ -342,6 +378,21 @@ async def evaluate_player(
 async def player_leaderboard(
     hours: int = 168, limit: int = 25, exclude_infrastructure: bool = True,
     casino_slug: str | None = None,
+) -> dict:
+    """Ranked counterparties, served from the aggregate cache.
+
+    Same reasoning as the market aggregates: the underlying registry-wide read
+    does not fit a request deadline, but its answer is small enough to keep.
+    """
+    return await cached_aggregate(
+        ("leaderboard", hours, limit, exclude_infrastructure, casino_slug),
+        lambda: _build_player_leaderboard(hours, limit, exclude_infrastructure, casino_slug),
+    )
+
+
+async def _build_player_leaderboard(
+    hours: int, limit: int, exclude_infrastructure: bool,
+    casino_slug: str | None,
 ) -> dict:
     """Rank counterparties by net observed position across operator clusters.
 
@@ -520,8 +571,7 @@ async def player_leaderboard(
             for operator in operators
             for chain in operator.queried_chains
         }),
-        "data_source": _worst([f.data_source for f in flows]),
-        "coverage_complete": all(f.complete for f in flows),
+        **coverage_fields(flows),
         "methodology": (
             "Net position is value received from attributed operator clusters minus "
             "value sent to them, over the window. It is not gambling profit and loss: "
@@ -558,6 +608,17 @@ def _segment(gross_usd: float) -> str:
 
 
 async def player_cohorts(hours: int = 168) -> dict:
+    """Counterparty cohorts, served from the aggregate cache.
+
+    Same registry-wide read, same deadline problem, same remedy as
+    `player_leaderboard`.
+    """
+    return await cached_aggregate(
+        ("cohorts", hours), lambda: _build_player_cohorts(hours)
+    )
+
+
+async def _build_player_cohorts(hours: int) -> dict:
     """Segment every observed counterparty by value, recency, and reach.
 
     Answers the questions a leaderboard cannot: how concentrated is the player
@@ -676,8 +737,7 @@ async def player_cohorts(hours: int = 168) -> dict:
             "top_50_share_pct": top_share(50),
             "top_100_share_pct": top_share(100),
         },
-        "data_source": _worst([f.data_source for f in flows]),
-        "coverage_complete": all(f.complete for f in flows),
+        **coverage_fields(flows),
         "note": (
             "Covers every observed counterparty, not only those with a round trip, "
             "so it is the more representative view. An address is still not proven "
@@ -687,6 +747,13 @@ async def player_cohorts(hours: int = 168) -> dict:
 
 
 async def cross_operator_overlap(hours: int = 168) -> dict:
+    """Shared-counterparty overlap, served from the aggregate cache."""
+    return await cached_aggregate(
+        ("overlap", hours), lambda: _build_cross_operator_overlap(hours)
+    )
+
+
+async def _build_cross_operator_overlap(hours: int = 168) -> dict:
     """Addresses transacting with more than one operator.
 
     Shared users are a genuine competitive signal: high overlap means operators
@@ -756,7 +823,7 @@ async def cross_operator_overlap(hours: int = 168) -> dict:
             ),
             key=lambda r: -r["unique_addresses"],
         ),
-        "data_source": _worst([f.data_source for f in flows]),
+        **coverage_fields(flows),
         "note": (
             "Two addresses are not proven to be two people, and one person may use "
             "several addresses — overlap is a floor on shared audience, not a count "

@@ -79,10 +79,10 @@ input_schema:
     anomaly endpoints accept a 0x-prefixed EVM address, chain, and optional
     lookback. Aggregate GET endpoints accept bounded query parameters. See each
     endpoint description for its exact request shape and default window. The
-     live chain index is ethereum, base, polygon, arbitrum, optimism, bsc,
-     avalanche, solana, tron, and bitcoin. EVM reads use Alchemy; non-EVM native
-     transfer reads use configured Solana JSON-RPC, TronGrid, and Esplora
-     endpoints. Availability also depends on reviewed wallet attribution,
+    live chain index is ethereum, base, polygon, arbitrum, optimism, bsc,
+    avalanche, solana, tron, and bitcoin. EVM reads use Alchemy; non-EVM native
+    transfer reads use configured Solana JSON-RPC, TronGrid, and Esplora
+    endpoints. Availability also depends on reviewed wallet attribution,
      upstream health, token pricing, pagination limits, and the requested
      lookback window.
   properties:
@@ -97,7 +97,7 @@ input_schema:
       examples: ["0x974caa59e49682cda0ad2bbe82983419a2ecc400"]
     chain:
       type: string
-       enum: [ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin]
+      enum: [ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin]
       default: ethereum
     hours:
       type: integer
@@ -126,8 +126,11 @@ output_schema:
     verdict:
       type: string
       description: >
-        Short label. net_inflow|net_outflow for operator flow; normal|suspicious|critical
-        for fraud screening; the casino slug or 'unlabeled' for wallet traces.
+        Short label. net_inflow|net_outflow for operator flow; normal|suspicious|
+        critical for fraud screening (the legacy alias of risk_tier, retained for
+        existing consumers); the casino slug or 'unlabeled' for wallet traces;
+        the transaction status for lookups; 'invalid_input' when a request failed
+        validation before any chain read was attempted.
     reasoning:
       type: string
       description: "Human-readable explanation of how the verdict was reached."
@@ -174,12 +177,65 @@ output_schema:
       minimum: 0
       maximum: 1
       description: "Anomaly prioritization score. Higher means more evidence requires review."
+    risk_tier:
+      type: string
+      enum: [insufficient_data, low_risk, elevated_risk, high_risk]
+      description: >
+        Canonical risk label. insufficient_data means the window could not be
+        characterised — too few transfers, or a provider that did not answer. It
+        is NOT a clean result and never sets is_suspicious. No tier asserts that
+        fraud occurred; the vocabulary stops at review priority deliberately,
+        because the miner observes settlement and cannot see intent or identity.
+    risk_score:
+      type: number
+      minimum: 0
+      maximum: 1
+      description: >
+        Bounded, deterministic sum of the screens that fired. Same upstream
+        state always yields the same score.
     is_suspicious:
       type: boolean
+      description: >
+        True exactly when risk_tier is elevated_risk or high_risk. Derived from
+        the tier so the boolean, the tier, and the score cannot disagree.
     signals:
       type: array
       items: { type: string }
-      description: "Named fraud patterns matched, with evidence."
+      description: "Named screens that fired, each with its measurement."
+    risk_signals:
+      type: array
+      description: >
+        Every screen that ran, fired or not, each with severity, score,
+        measurement, and evidence identifiers. A screen that did not fire still
+        reports what it measured.
+      items:
+        type: object
+        properties:
+          name: { type: string }
+          severity: { type: string, enum: [info, low, medium, high] }
+          score: { type: number }
+          measurement: { type: string }
+          evidence:
+            type: array
+            items: { type: string }
+    native_balance_wei:
+      type: [string, "null"]
+      description: >
+        Native balance in exact base units, as a string. Null — never 0 — when
+        the provider could not be read. A float at wei scale is lossy:
+        999999999999999999 round-trips to a whole unit.
+    block_number:
+      type: [integer, "null"]
+      description: "Block height the balance or transaction read reflects."
+    balance_status:
+      type: string
+      enum: [observed, unavailable]
+    association_scan_status:
+      type: string
+      enum: [complete, not_completed_in_budget]
+      description: >
+        Whether the derived 30-day operator-interaction scan finished. Not
+        completed means missing coverage, not zero interactions.
 
 endpoints:
   - path: /transaction/lookup
@@ -187,11 +243,18 @@ endpoints:
     method: POST
     description: >
       Canonical transaction lookup by chain and transaction hash. Returns direct
-      RPC facts including status, block, sender, recipient, native value, gas
-      fields, method input, and a separately labeled operator-attribution layer.
-      Use this endpoint when an agent needs the most verifiable answer in the
-      product. A missing registry match is returned as unattributed, not as proof
-      that the transaction has no gambling relationship.
+      RPC facts: status (confirmed, reverted, or pending — all distinguishable
+      from not_found), block number, block hash, block timestamp, transaction
+      index, nonce, sender, recipient, native value in wei and human units with
+      the native symbol, gas limit, gas used, effective gas price, total fee,
+      deployed contract address, method id, calldata, and ERC-20 transfers
+      decoded from the receipt logs with contract, symbol, decimals, and exact
+      raw amounts. Where token decimals are unknown the raw amount is returned
+      and the scaled amount is null rather than assuming 18 decimals. Operator
+      attribution is a separately labelled layer; a missing registry match is
+      returned as unattributed, not as proof that the transaction has no
+      gambling relationship. Accepts tx_hash, txHash, hash, transaction_hash, or
+      transactionHash.
       REQUEST: {"tx_hash": "0x...", "chain": "ethereum"}
 
   - path: /casino/stats
@@ -226,30 +289,66 @@ endpoints:
     external_path: /wallet/trace
     method: POST
     description: >
-      Returns a wallet's direct native balance where available and its observed
-      interactions with attributed operator clusters over the supported window.
-      Attribution is a registry claim with evidence status; an address is not a
-      person and an interaction does not establish gambling intent.
+      Direct balance facts for one address, plus a separately labelled
+      attribution layer. The balance is the answer: exact native balance in base
+      units (native_balance_wei, a string to preserve precision) and in human
+      units, the native asset symbol, the block the read reflects, and ERC-20
+      token balances with contract, symbol, decimals, and both raw and scaled
+      amounts. A provider failure returns null with balance_status
+      "unavailable" and confidence 0 — never a zero balance, which is
+      indistinguishable from a genuinely empty wallet and is wrong. Registry
+      attribution and the 30-day operator-interaction scan are derived context,
+      run on their own budget, and never delay or displace the balance; when the
+      scan does not finish it reports association_scan_status
+      "not_completed_in_budget", which is missing coverage, not an observation of
+      zero interactions. Attribution is a reviewed ownership claim about an
+      address; an address is not a person and an interaction does not establish
+      gambling intent. Also served at /wallet/balance.
       REQUEST: {"address": "0x974caa...c400", "chain": "ethereum"}
-      RESPONSE: {"address": "0x974caa...c400", "chain": "ethereum",
-      "balance_native": 5270.82, "labeled_casino": "stake",
+      RESPONSE: {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
+      "chain": "ethereum", "block_number": 25832082, "native_symbol": "ETH",
+      "native_balance_wei": "1431585373632929230863",
+      "native_balance": 1431.5853736329292, "token_balances": [{"contract":
+      "0xdac17f958d2ee523a2206206994597c13d831ec7", "symbol": "USDT",
+      "decimals": 6, "raw_balance": "1500000", "balance": 1.5}],
+      "token_count": 1, "balance_status": "observed", "labeled_casino": "stake",
       "associations": [{"casino_slug": "stake", "interactions_30d": 6482,
-      "cluster_confidence": 0.95}], "confidence": 0.98, "verdict": "stake",
-      "reasoning": "...", "data_source": "live"}
+      "cluster_confidence": 0.75}], "association_scan_status": "complete",
+      "confidence": 0.75, "verdict": "stake", "reasoning": "...",
+      "data_source": "live"}
 
   - path: /anomaly/check
     external_path: /anomaly/check
     method: POST
     description: >
-      Deterministically screens an address for observable patterns such as
-      round-trip transfers, unusual transaction velocity, and clustered or sybil-
-      like activity. Returns a prioritization score and named evidence for review;
-      it is not a fraud verdict, identity decision, or enforcement result.
+      Deterministic risk triage for one address. Runs five named screens —
+      round-trip return, transfer velocity, counterparty concentration, dust
+      fan-in, and repeated identical amounts — and reports each screen's
+      MEASUREMENT whether or not it fired, so a low-risk answer is backed by the
+      same numbers a high-risk one would be. Known exchange, bridge, DEX-router
+      and attributed-operator counterparties are identified and mitigate the
+      screens that ordinary settlement trips by construction; round trips with
+      them are excluded from the score and reported separately. risk_tier is the
+      canonical label and is one of insufficient_data, low_risk, elevated_risk,
+      high_risk. An address with too few transfers to characterise is
+      insufficient_data, never low_risk — unmeasured coverage is not a clean
+      result. This is review prioritization from observable transfer patterns; it
+      is never a finding of fraud, an identity decision, or an enforcement result,
+      and no tier asserts that an offence occurred.
       REQUEST: {"address": "0x974caa...c400", "chain": "ethereum", "hours": 24}
-      RESPONSE: {"address": "0x974caa...c400", "verdict": "suspicious",
-      "score": 0.45, "is_suspicious": true, "signals": ["wash-trade round-trip
-      0x1a2b...↔0x3c4d..."], "transfers_analyzed": 234, "confidence": 0.78,
-      "reasoning": "...", "data_source": "live"}
+      RESPONSE: {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
+      "chain": "ethereum", "window_hours": 24, "risk_tier": "low_risk",
+      "risk_score": 0.0, "is_suspicious": false, "verdict": "normal",
+      "risk_signals": [{"name": "round_trip_return", "severity": "info",
+      "score": 0.0, "measurement": "0 of 332 outbound transfers returned...",
+      "evidence": []}], "signals_fired": [], "screens_run": 5,
+      "transfers_analyzed": 1231, "inbound_transfers": 899,
+      "outbound_transfers": 332, "distinct_counterparties": 831,
+      "top_counterparty_share_pct": 31.2, "round_trip_count": 0,
+      "peak_hourly_transfers": 96, "mean_hourly_transfers": 55.83,
+      "infrastructure_counterparties": [{"address": "0x28c6...", "label":
+      "Binance 14", "category": "exchange"}], "coverage_complete": true,
+      "confidence": 0.85, "reasoning": "...", "data_source": "live"}
 
   - path: /casinos
     external_path: /casinos

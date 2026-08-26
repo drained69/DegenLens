@@ -28,25 +28,53 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import __version__, attribution, market, metrics, players, providers
+from . import __version__, analytics, attribution, market, metrics, players, providers
 # Aliased: the module name collides with the `health` endpoint function below.
 from . import health as health_checks
-from .analytics import anomaly_check, cached_casino_stats, casino_stats, rank_casinos, wallet_trace
-from .onchain import circuit_status, transaction_lookup
+from .analytics import anomaly_check, casino_stats, rank_casinos, wallet_trace
+from .onchain import (
+    NATIVE_SYMBOL,
+    BalanceSnapshot,
+    balance_snapshot,
+    circuit_status,
+    request_deadline,
+    transaction_lookup,
+)
 from .settings import settings
 from .wallets import all_casinos, catalog, get_casino, resolve_address, resolve_wallet
 
 SUPPORTED_INTENTS = ["ONCHAIN_TX_LOOKUP", "WALLET_BALANCE_CHECK", "FRAUD_DETECTION"]
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Warm the aggregate cache in the background, then serve.
+
+    Registry-wide reads take minutes, so the first caller after a deploy would
+    otherwise be told no completed read exists yet. Priming runs as a detached
+    task: startup must not block on the provider.
+    """
+    task = asyncio.create_task(market.prime_aggregates())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="DegenMiner",
     version=__version__,
     description=(
@@ -60,67 +88,167 @@ app = FastAPI(
     ),
 )
 
+
+class DeadlineAndSafetyMiddleware:
+    """Time every request and guarantee a structured response, on time.
+
+    This is pure ASGI on purpose. Under `BaseHTTPMiddleware` an
+    `asyncio.wait_for` around `call_next` computes the timeout correctly but
+    cannot *deliver* it: Starlette runs the endpoint in a task group whose
+    `__aexit__` joins the abandoned task, so the response is withheld until the
+    slow handler finishes anyway. Registry-wide reads then blew past the
+    caller's own ceiling and every request was scored as a failure. Owning the
+    send channel here lets us emit the degraded payload and cancel the
+    runaway handler at the deadline.
+
+    An unhandled exception would be a 500 from the node's perspective — a
+    failed answer, and a direct hit to the Canonical Score. We convert any
+    escape into a well-formed low-confidence payload instead.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    @property
+    def timeout_s(self) -> float:
+        """Read the deadline per request, not once at construction.
+
+        Freezing it here would silently ignore any later change to the
+        setting — including the ones tests use to exercise this path.
+        """
+        return settings.request_timeout_s
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        timeout_s = self.timeout_s
+        started = time.perf_counter()
+        endpoint = scope.get("path", "")
+        response_started = False
+        status_code = 500
+
+        async def send_wrapper(message) -> None:
+            nonlocal response_started, status_code
+            if message["type"] == "http.response.start":
+                response_started = True
+                status_code = message["status"]
+                duration_ms = (time.perf_counter() - started) * 1000
+                # Headers must be mutated before they go out on the wire.
+                headers = MutableHeaders(scope=message)
+                headers["X-Response-Time-Ms"] = f"{duration_ms:.2f}"
+            await send(message)
+
+        try:
+            # Give upstream reads the same deadline the response is held to, so
+            # retries stop when there is no time left to use the result.
+            with request_deadline(timeout_s):
+                await asyncio.wait_for(
+                    self.app(scope, receive, send_wrapper), timeout=timeout_s
+                )
+        except (TimeoutError, asyncio.TimeoutError):
+            duration_ms = (time.perf_counter() - started) * 1000
+            metrics.record_request(endpoint, duration_ms, error=True)
+            if response_started:
+                # Bytes are already on the wire; we cannot replace them.
+                return
+            await _degraded_response(
+                reasoning=(
+                    f"Request exceeded the {timeout_s:g}s service deadline; "
+                    "no partial result is presented as complete."
+                ),
+                error="request_timeout",
+                extra={
+                    "coverage_complete": False,
+                    "caveat": "Retry later or request a narrower lookback window.",
+                },
+            )(scope, receive, send)
+            return
+        except Exception as exc:  # noqa: BLE001
+            duration_ms = (time.perf_counter() - started) * 1000
+            metrics.record_request(endpoint, duration_ms, error=True)
+            if response_started:
+                raise
+            await _degraded_response(
+                reasoning=f"Internal error while serving request: {type(exc).__name__}.",
+                error=type(exc).__name__,
+            )(scope, receive, send)
+            return
+
+        duration_ms = (time.perf_counter() - started) * 1000
+        metrics.record_request(endpoint, duration_ms, error=status_code >= 500)
+
+
+def _degraded_response(
+    *, reasoning: str, error: str, extra: dict[str, Any] | None = None
+) -> JSONResponse:
+    """A well-formed answer for a request that could not be served."""
+    now = _now_iso()
+    return JSONResponse(
+        status_code=200,
+        content={
+            "verdict": "unavailable",
+            "confidence": 0.0,
+            "reasoning": reasoning,
+            "data_source": "unavailable",
+            **(extra or {}),
+            "error": error,
+            "served_at": now,
+            "timestamp": now,
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Answer a malformed request instead of returning a bare 422.
+
+    FastAPI's default 422 body is a list of pydantic errors with no
+    `confidence`, `verdict`, or `reasoning`. The node reads those three fields
+    per `semantics.signal_mapping`, so a 422 is not a low-scoring answer — it is
+    an unscoreable one, indistinguishable from an outage. A caller that sends a
+    malformed hash still deserves a well-formed, honest, zero-confidence reply
+    that names exactly which field was wrong.
+
+    The status stays 200 for the same reason every other failure path does: this
+    service never returns a status the node will read as a dead miner.
+    """
+    fields = []
+    for err in exc.errors()[:5]:
+        loc = ".".join(str(p) for p in err.get("loc", ()) if p != "body")
+        fields.append(f"{loc or 'body'}: {err.get('msg', 'invalid')}")
+    detail = "; ".join(fields) or "request body failed validation"
+    now = _now_iso()
+    return JSONResponse(
+        status_code=200,
+        content={
+            "verdict": "invalid_input",
+            "confidence": 0.0,
+            "reasoning": (
+                f"Request rejected before any chain read: {detail}. "
+                "No lookup was attempted, so this is a request-format error, "
+                "not an observation about the address, transaction, or chain."
+            ),
+            "data_source": "unavailable",
+            "error": "invalid_input",
+            "invalid_fields": fields,
+            "served_at": now,
+            "timestamp": now,
+        },
+    )
+
+
+# Added last is outermost. CORS must wrap the deadline so a degraded timeout
+# payload still carries the headers the browser dashboard needs.
+app.add_middleware(DeadlineAndSafetyMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.middleware("http")
-async def timing_and_safety(request: Request, call_next):
-    """Time every request and guarantee a structured response.
-
-    An unhandled exception here would be a 500 from the node's perspective —
-    a failed answer, and a direct hit to the Canonical Score. We convert any
-    escape into a well-formed low-confidence payload instead.
-    """
-    started = time.perf_counter()
-    endpoint = request.url.path
-    try:
-        response = await asyncio.wait_for(
-            call_next(request), timeout=settings.request_timeout_s
-        )
-    except TimeoutError:
-        duration_ms = (time.perf_counter() - started) * 1000
-        metrics.record_request(endpoint, duration_ms, error=True)
-        return JSONResponse(
-            status_code=200,
-            content={
-                "verdict": "unavailable",
-                "confidence": 0.0,
-                "reasoning": (
-                    f"Request exceeded the {settings.request_timeout_s:g}s service deadline; "
-                    "no partial result is presented as complete."
-                ),
-                "data_source": "unavailable",
-                "coverage_complete": False,
-                "caveat": "Retry later or request a narrower lookback window.",
-                "error": "request_timeout",
-                "served_at": _now_iso(),
-                "timestamp": _now_iso(),
-            },
-        )
-    except Exception as exc:  # noqa: BLE001
-        duration_ms = (time.perf_counter() - started) * 1000
-        metrics.record_request(endpoint, duration_ms, error=True)
-        return JSONResponse(
-            status_code=200,
-            content={
-                "verdict": "unavailable",
-                "confidence": 0.0,
-                "reasoning": f"Internal error while serving request: {type(exc).__name__}.",
-                "data_source": "unavailable",
-                "error": type(exc).__name__,
-                "served_at": _now_iso(),
-                "timestamp": _now_iso(),
-            },
-        )
-    duration_ms = (time.perf_counter() - started) * 1000
-    metrics.record_request(endpoint, duration_ms, error=response.status_code >= 500)
-    response.headers["X-Response-Time-Ms"] = f"{duration_ms:.2f}"
-    return response
 
 
 def _now_iso() -> str:
@@ -240,20 +368,190 @@ class CasinoStatsRequest(BaseModel):
     hours: int = Field(24, ge=1, le=720, description="Lookback window in hours")
 
 
+# ── Intent request contract ──────────────────────────────────────────────────
+# These three models are what the Telegraph node actually posts to. Two rules
+# hold, and both were learned from live 422s that the node cannot score:
+#
+#   1. ACCEPT EVERY CHAIN THE MANIFEST DECLARES. `config/miner.yaml` publishes a
+#      ten-chain enum. Rejecting `solana` at the schema boundary returned a 422
+#      whose body carries no confidence/verdict/reasoning, so the node saw a
+#      failed answer rather than an honest "this adapter cannot serve that".
+#      Coverage is now decided in the handler, which can say so in the response
+#      contract. Anything outside the declared set is still refused here.
+#
+#   2. ACCEPT THE OBVIOUS SPELLING OF EACH FIELD. Agents and routers send
+#      `txHash` and `hash` as often as `tx_hash`. Populating one canonical field
+#      from a small, unambiguous alias set costs nothing and converts a
+#      guaranteed zero into a real answer. Aliases are only added where exactly
+#      one field could be meant — `address` and `slug` are never aliased to each
+#      other, for instance.
+
+DECLARED_CHAINS = (
+    "ethereum", "base", "polygon", "arbitrum", "optimism", "bsc",
+    "avalanche", "solana", "tron", "bitcoin",
+)
+_CHAIN_PATTERN = r"^(" + "|".join(DECLARED_CHAINS) + r")$"
+
+# Spellings of the same chain that routers commonly emit. Mapping them is
+# unambiguous; guessing at unknown names is not.
+_CHAIN_ALIASES = {
+    "eth": "ethereum", "mainnet": "ethereum", "eth-mainnet": "ethereum",
+    "matic": "polygon", "polygon-pos": "polygon",
+    "arb": "arbitrum", "arbitrum-one": "arbitrum",
+    "op": "optimism", "optimism-mainnet": "optimism",
+    "bnb": "bsc", "binance-smart-chain": "bsc", "bnb-chain": "bsc",
+    "avax": "avalanche",
+    "sol": "solana",
+    "trx": "tron",
+    "btc": "bitcoin",
+}
+
+
+def _normalize_chain(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    cleaned = value.strip().lower()
+    return _CHAIN_ALIASES.get(cleaned, cleaned)
+
+
+def _first_alias(data: Any, canonical: str, aliases: tuple[str, ...]) -> Any:
+    """Fill `canonical` from the first present alias, without overwriting it."""
+    if not isinstance(data, dict):
+        return data
+    if data.get(canonical) not in (None, ""):
+        return data
+    for alias in aliases:
+        value = data.get(alias)
+        if value not in (None, ""):
+            merged = dict(data)
+            merged[canonical] = value
+            return merged
+    return data
+
+
 class WalletTraceRequest(BaseModel):
     address: str = Field(..., description="Wallet address (0x-prefixed, 40 hex chars)")
-    chain: str = Field("ethereum", pattern=r"^(ethereum|base|polygon|arbitrum|optimism|bsc|avalanche)$", description="ethereum | base | polygon | arbitrum | optimism | bsc | avalanche")
+    chain: str = Field(
+        "ethereum",
+        pattern=_CHAIN_PATTERN,
+        description=" | ".join(DECLARED_CHAINS),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_aliases(cls, data: Any) -> Any:
+        data = _first_alias(data, "address", ("wallet", "wallet_address", "account", "addr"))
+        data = _first_alias(data, "chain", ("network", "chain_id", "chainId"))
+        if isinstance(data, dict):
+            data = dict(data)
+            if isinstance(data.get("address"), str):
+                data["address"] = data["address"].strip()
+            if "chain" in data:
+                data["chain"] = _normalize_chain(data["chain"])
+        return data
 
 
 class AnomalyRequest(BaseModel):
     address: str = Field(..., description="Wallet address to screen")
-    chain: str = Field("ethereum", pattern=r"^(ethereum|base|polygon|arbitrum|optimism|bsc|avalanche)$", description="ethereum | base | polygon | arbitrum | optimism | bsc | avalanche")
+    chain: str = Field(
+        "ethereum",
+        pattern=_CHAIN_PATTERN,
+        description=" | ".join(DECLARED_CHAINS),
+    )
     hours: int = Field(24, ge=1, le=720, description="Lookback window in hours")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_aliases(cls, data: Any) -> Any:
+        data = _first_alias(data, "address", ("wallet", "wallet_address", "account", "addr"))
+        data = _first_alias(data, "chain", ("network", "chain_id", "chainId"))
+        data = _first_alias(data, "hours", ("window_hours", "lookback_hours", "hours_back"))
+        if isinstance(data, dict):
+            data = dict(data)
+            if isinstance(data.get("address"), str):
+                data["address"] = data["address"].strip()
+            if "chain" in data:
+                data["chain"] = _normalize_chain(data["chain"])
+        return data
 
 
 class TransactionLookupRequest(BaseModel):
-    tx_hash: str = Field(..., pattern=r"^0x[a-fA-F0-9]{64}$")
-    chain: str = Field("ethereum", pattern=r"^(ethereum|base|polygon|arbitrum|optimism|bsc|avalanche)$")
+    # Case and surrounding whitespace are normalised before the pattern runs, so
+    # a checksummed or padded hash is answered rather than refused. The 64-hex
+    # shape itself is still enforced: a malformed hash is a real client error and
+    # is reported as invalid_input, not looked up.
+    tx_hash: str = Field(..., pattern=r"^0x[a-f0-9]{64}$")
+    chain: str = Field("ethereum", pattern=_CHAIN_PATTERN)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_aliases(cls, data: Any) -> Any:
+        data = _first_alias(
+            data, "tx_hash",
+            ("txHash", "hash", "transaction_hash", "transactionHash", "txhash", "tx"),
+        )
+        data = _first_alias(data, "chain", ("network", "chain_id", "chainId"))
+        if isinstance(data, dict):
+            data = dict(data)
+            if isinstance(data.get("tx_hash"), str):
+                data["tx_hash"] = data["tx_hash"].strip().lower()
+            if "chain" in data:
+                data["chain"] = _normalize_chain(data["chain"])
+        return data
+
+
+def _unread_operator_payload(operator, hours: int) -> dict[str, Any]:
+    """Identity for an operator whose chain read missed the budget.
+
+    Identity, licensing, and the registered chain set come from the registry and
+    cost nothing to serve — only the FIGURES need a provider. Dropping the whole
+    operator because its read was slow made a slow provider look like an empty
+    registry. Every flow field is None, never 0, and each registered chain is
+    marked unavailable so the reason a row is quiet stays visible.
+    """
+    claimed = sorted({w.chain for w in operator.wallets})
+    return {
+        "slug": operator.slug,
+        "name": operator.name,
+        "website": operator.website,
+        "licensed_in": operator.licensed_in,
+        "established": operator.established,
+        "window_hours": hours,
+        "observed_inbound_usd": None,
+        "observed_outbound_usd": None,
+        "attributed_customer_inflow_usd": None,
+        "attributed_customer_outflow_usd": None,
+        "internal_transfers_usd": None,
+        "unknown_flow_usd": None,
+        "net_observed_flow_usd": None,
+        "net_customer_flow_usd": None,
+        "deposits_usd": None,
+        "withdrawals_usd": None,
+        "net_flow_usd": None,
+        "unique_depositors": None,
+        "unique_withdrawers": None,
+        "transaction_count": None,
+        "wallet_count": len(operator.wallets),
+        "chains": [],
+        "chains_claimed": claimed,
+        "chains_queried": operator.queried_chains,
+        "indexed_chains": operator.queried_chains,
+        "by_chain": [
+            {"chain": chain, "status": "unavailable", "transfers": None,
+             "inbound_usd": None, "outbound_usd": None}
+            for chain in operator.queried_chains
+        ],
+        "coverage_complete": False,
+        "coverage": "unread",
+        "coverage_status": "unread",
+        "stale": False,
+        "confidence": 0.0,
+        "classification": "UNREAD",
+        "evidence": [],
+        "duplicate_count": 0,
+        "data_source": "unavailable",
+        "verdict": "not_read",
+    }
 
 
 def _public_operator_payload(stats) -> dict[str, Any]:
@@ -288,6 +586,8 @@ def _public_operator_payload(stats) -> dict[str, Any]:
         "coverage_complete": stats.coverage_complete,
         "coverage": stats.coverage,
         "coverage_status": "complete" if stats.coverage_complete else "partial",
+        # Real figures, computed slightly earlier while a deeper rescan runs.
+        "stale": stats.stale,
         "confidence": stats.confidence,
         "classification": "CALCULATED",
         "evidence": stats.evidence,
@@ -412,12 +712,19 @@ async def public_operators_endpoint(hours: int = 168) -> dict[str, Any]:
     """Public identity and multi-chain observations for attributed operators."""
     hours = max(1, min(hours, 720))
     operators = all_casinos()
-    stats = (
-        [cached_casino_stats(operator.slug, hours) for operator in operators]
-        if settings.live_data_available
-        else await asyncio.gather(*(casino_stats(operator.slug, hours) for operator in operators))
+    # Previously this served cache-only in live mode, so a cold cache answered
+    # "0 operators" — indistinguishable from a registry with nothing in it. Read
+    # under a budget instead: whoever answers in time is reported, whoever does
+    # not is counted as unread and warmed for the next caller.
+    stats = await market.gather_within_budget(
+        [casino_stats(operator.slug, hours) for operator in operators]
     )
-    snapshots = [_public_operator_payload(row) for row in stats if row is not None]
+    snapshots = [
+        _public_operator_payload(row) if row is not None
+        else _unread_operator_payload(operator, hours)
+        for operator, row in zip(operators, stats)
+    ]
+    unread = [op.slug for op, row in zip(operators, stats) if row is None]
     sources = [row["data_source"] for row in snapshots]
     source = (
         "unavailable" if sources and all(value == "unavailable" for value in sources)
@@ -431,17 +738,104 @@ async def public_operators_endpoint(hours: int = 168) -> dict[str, Any]:
     all_chains = sorted({chain for row in snapshots for chain in row["indexed_chains"]})
     return _stamp({
         "count": len(snapshots),
+        "operators_catalogued": len(operators),
+        "operators_unread": len(unread),
+        "unread_operators": sorted(unread),
+        "coverage_complete": not unread,
         "window_hours": hours,
         "indexed_chains": all_chains,
         "operators": snapshots,
-        "confidence": min((row["confidence"] for row in snapshots), default=0.0),
-        "verdict": f"{len(snapshots)}_operators_multichain",
+        # Confidence describes the FIGURES, so it is the weakest READ operator —
+        # an unread one contributes no figures. The gap it does represent is
+        # carried by operators_unread and coverage_complete, not by folding a
+        # zero into a reading.
+        "confidence": min(
+            (row["confidence"] for row in snapshots if row["data_source"] != "unavailable"),
+            default=0.0,
+        ),
+        "verdict": f"{len(snapshots) - len(unread)}_operators_multichain",
         "reasoning": (
-            f"Returned public identity and chain-by-chain observations for {len(snapshots)} "
-            f"operators across {len(all_chains)} indexed chains."
+            f"Returned public identity and chain-by-chain observations for "
+            f"{len(snapshots)} operators across {len(all_chains)} indexed chains."
+            + (
+                f" {len(unread)} operator(s) ({', '.join(sorted(unread))}) carry "
+                f"identity only — their chain read did not complete in the request "
+                f"budget, so their figures are absent rather than zero."
+                if unread else ""
+            )
         ),
         "data_source": source,
     })
+
+
+def _transaction_reasoning(
+    tx, native_symbol: str, token_rows: list[dict],
+    classification: str, associations: list[dict],
+) -> str:
+    """State the transaction's facts, in the order they are asked for.
+
+    The previous form named neither the hash, the parties, the value, nor the
+    cost — it said only that a lookup had happened and how many registry claims
+    matched. For a lookup intent the figures ARE the answer, so they are stated
+    here rather than left to be read out of the structured fields.
+
+    Polarity is explicit: a confirmed transaction "succeeded", a reverted one
+    "failed". Those are the states the chain reports, and an answer that hedges
+    between them has not answered.
+    """
+    outcome = {
+        "confirmed": "succeeded",
+        "reverted": "failed and was reverted",
+        "pending": "is pending and not yet mined",
+    }.get(tx.status, tx.status)
+
+    parts = [
+        f"Transaction {tx.tx_hash} on {tx.chain} {outcome}.",
+        f"Sender {tx.from_addr}"
+        + (f" sent to {tx.to_addr}" if tx.to_addr else " deployed a contract")
+        + f", value {_units(tx.value_wei)} {native_symbol} ({tx.value_wei} wei).",
+    ]
+    if tx.block_number is not None:
+        block = f"Mined in block {tx.block_number}"
+        if tx.block_timestamp:
+            block += f" at {tx.block_timestamp}"
+        if tx.transaction_index is not None:
+            block += f", position {tx.transaction_index}"
+        parts.append(block + ".")
+    if tx.gas_used is not None and tx.effective_gas_price_wei is not None:
+        parts.append(
+            f"Gas used {tx.gas_used} of {tx.gas} limit at {tx.effective_gas_price_wei} wei "
+            f"effective price, total fee {tx.fee_wei} wei"
+            + (f" ({_units(tx.fee_wei)} {native_symbol})." if tx.fee_wei is not None else ".")
+        )
+    if tx.contract_address:
+        parts.append(f"Deployed contract at {tx.contract_address}.")
+    if token_rows:
+        first = token_rows[0]
+        amount = first["amount"] if first["amount"] is not None else first["raw_amount"]
+        parts.append(
+            f"Carries {len(token_rows)} ERC-20 transfer(s); the first moves {amount} "
+            f"{first['symbol'] or first['contract']} from {first['from_address']} "
+            f"to {first['to_address']}."
+        )
+    if associations:
+        names = ", ".join(
+            f"{a['operator_name']} ({a['direction']} address {a['address']}, "
+            f"{a['evidence_status']} claim)"
+            for a in associations
+        )
+        parts.append(
+            f"Registry attribution: {names}. Classified {classification}. "
+            "Attribution is a reviewed ownership claim about an address, not "
+            "evidence that this transaction is a wager, deposit, or withdrawal."
+        )
+    else:
+        parts.append(
+            f"Neither address matches the operator registry, so this transaction is "
+            f"{classification}. That is absence of a registry claim, not evidence "
+            "that no gambling relationship exists."
+        )
+    return " ".join(parts)
 
 
 @app.post("/transaction/lookup", tags=["ONCHAIN_TX_LOOKUP"])
@@ -472,7 +866,9 @@ async def transaction_lookup_endpoint(req: TransactionLookupRequest) -> dict[str
                 "operator_name": operator.name,
                 "address": wallet.address,
                 "role": wallet.role,
+                "label": wallet.label,
                 "confidence": wallet.confidence,
+                "source_confidence": wallet.source_confidence,
                 "evidence_status": wallet.evidence_status,
                 "evidence": list(wallet.evidence),
             })
@@ -482,24 +878,63 @@ async def transaction_lookup_endpoint(req: TransactionLookupRequest) -> dict[str
         else "operator_internal" if from_claim and to_claim
         else "unattributed"
     )
+    native_symbol = NATIVE_SYMBOL.get(transaction.chain, "ETH")
+    token_rows = [
+        {
+            "contract": t.contract,
+            "symbol": t.symbol,
+            "decimals": t.decimals,
+            "from_address": t.from_addr,
+            "to_address": t.to_addr,
+            "raw_amount": str(t.raw_amount),
+            "amount": t.amount,
+        }
+        for t in transaction.token_transfers
+    ]
+
+    # Direct RPC facts first, attribution strictly after and clearly labelled.
+    # A registry match describes who we believe owns an address; it is not a
+    # property of the transaction and must never displace one.
     return _stamp({
         "tx_hash": transaction.tx_hash,
         "chain": transaction.chain,
         "status": transaction.status,
         "block_number": transaction.block_number,
         "block_hash": transaction.block_hash,
+        "block_timestamp": transaction.block_timestamp,
+        "transaction_index": transaction.transaction_index,
+        "nonce": transaction.nonce,
         "from_address": transaction.from_addr,
         "to_address": transaction.to_addr,
         "value_wei": str(transaction.value_wei),
         "value_native": transaction.value_native,
+        "native_symbol": native_symbol,
         "gas": transaction.gas,
+        "gas_limit": transaction.gas,
+        "gas_used": transaction.gas_used,
         "gas_price_wei": str(transaction.gas_price_wei),
+        "effective_gas_price_wei": (
+            str(transaction.effective_gas_price_wei)
+            if transaction.effective_gas_price_wei is not None else None
+        ),
+        "fee_wei": str(transaction.fee_wei) if transaction.fee_wei is not None else None,
+        "fee_native": transaction.fee_native,
+        "contract_address": transaction.contract_address,
+        "method_id": transaction.method_id,
         "input": transaction.input,
+        "token_transfers": token_rows,
+        "token_transfer_count": len(token_rows),
+        # ── Attribution layer (derived, not an RPC fact) ──────────────────
         "classification": classification,
         "associations": associations,
-        "confidence": max((a[1].confidence for a in (from_claim, to_claim) if a), default=1.0 if classification == "unattributed" else 0.0),
+        "confidence": max(
+            (a[1].confidence for a in (from_claim, to_claim) if a),
+            default=1.0 if classification == "unattributed" else 0.0,
+        ),
         "verdict": transaction.status,
-        "reasoning": f"Transaction resolved by chain RPC and classified as {classification} using {len(associations)} registry claim(s).",
+        "reasoning": _transaction_reasoning(
+            transaction, native_symbol, token_rows, classification, associations
+        ),
         "data_source": transaction.data_source,
         "method": "direct_rpc_lookup",
         "evidence": [{"type": "transaction", "chain": req.chain, "tx_hash": transaction.tx_hash}],
@@ -509,42 +944,206 @@ async def transaction_lookup_endpoint(req: TransactionLookupRequest) -> dict[str
 # ── WALLET_BALANCE_CHECK ─────────────────────────────────────────────────────
 
 
+def _units(raw: int | None, decimals: int = 18) -> str | None:
+    """Exact base-units -> human string, by integer arithmetic.
+
+    Never via float. `1431586854770926157824` wei formatted through a float and
+    `%.18f` renders as `1431.586854770926265701` — a different number, digits
+    that no chain state ever held. A lookup answer whose headline figure is
+    wrong in its last nine places is a wrong answer, and it is wrong in exactly
+    the way the scoring module penalises hardest.
+    """
+    if raw is None:
+        return None
+    sign = "-" if raw < 0 else ""
+    raw = abs(raw)
+    whole, frac = divmod(raw, 10 ** decimals)
+    if not frac:
+        return f"{sign}{whole}"
+    return f"{sign}{whole}.{str(frac).rjust(decimals, '0').rstrip('0')}"
+
+
+def _balance_reasoning(
+    snapshot, token_rows: list[dict], labeled, wallet_claim,
+    associations: list[dict], association_status: str,
+) -> str:
+    """State the balance, exactly, with the address written out in full.
+
+    The previous form truncated the subject to `0x974caa59...`, which is not an
+    address — it does not identify the account it is reporting on, and no
+    consumer or scorer can match it back to the one that was asked about. The
+    address is written in full here, once, as the subject of the first sentence.
+    """
+    addr = snapshot.address
+    if snapshot.data_source == "unavailable" or snapshot.native_amount is None:
+        return (
+            f"Balance for {addr} on {snapshot.chain} could not be read: "
+            f"{snapshot.reason or 'provider unavailable'}. The balance is unknown, "
+            "not zero, and no figure is reported."
+        )
+
+    decimals = {"solana": 9, "tron": 6, "bitcoin": 8}.get(snapshot.chain, 18)
+    amount = _units(snapshot.native_wei, decimals) or "0"
+    parts = [
+        f"Address {addr} on {snapshot.chain} holds {amount} "
+        f"{snapshot.native_symbol} ({snapshot.native_wei} wei)"
+        + (f" as of block {snapshot.block_number}." if snapshot.block_number else ".")
+    ]
+    if token_rows:
+        named = ", ".join(
+            f"{r['balance'] if r['balance'] is not None else r['raw_balance']} "
+            f"{r['symbol'] or r['contract']}"
+            for r in token_rows[:5]
+        )
+        parts.append(f"Also holds {len(token_rows)} token balance(s): {named}.")
+    else:
+        parts.append("No tracked token balances were returned for this address.")
+
+    if labeled and wallet_claim:
+        wallet = wallet_claim[1]
+        parts.append(
+            f"The registry claims this address as a {labeled.name} {wallet.role} wallet "
+            f"({wallet.evidence_status} claim, confidence {wallet.confidence}, "
+            f"reviewed {wallet.last_reviewed}). That is an ownership claim about the "
+            "address, not a statement about the funds in it."
+        )
+    if association_status == "complete":
+        parts.append(
+            f"Observed interactions with {len(associations)} attributed operator "
+            "cluster(s) over the last 30 days."
+        )
+    else:
+        parts.append(
+            "The 30-day operator-interaction scan did not complete inside its "
+            "budget, so no interaction count is reported. That is missing "
+            "coverage, not an observation of zero interactions."
+        )
+    return " ".join(parts)
+
+
+# How long the derived 30-day association crawl may hold up the direct balance
+# answer. The balance is two RPC calls; the crawl is a paged transfer scan that
+# put this endpoint's median at ~7s against an 8s deadline. The balance is the
+# answer to a balance question, so it is never held hostage to the enrichment:
+# past this budget the crawl is abandoned and reported as not completed.
+_ASSOCIATION_BUDGET_S = 3.0
+
+
+@app.post("/wallet/balance", tags=["WALLET_BALANCE_CHECK"])
 @app.post("/wallet/trace", tags=["WALLET_BALANCE_CHECK"])
 async def wallet_trace_endpoint(req: WalletTraceRequest) -> dict[str, Any]:
-    """Balance plus casino-cluster attribution for an address."""
-    labeled = resolve_address(req.address)
-    wallet_claim = resolve_wallet(req.address)
-    trace = await wallet_trace(req.address, req.chain)
+    """Direct balance facts for an address, plus separately-labelled attribution.
+
+    Two independent layers, and the ordering matters. The balance is a direct
+    chain read and is the answer. Registry attribution and observed operator
+    interactions are derived context: useful, clearly marked, and never allowed
+    to delay or displace the balance.
+
+    `/wallet/balance` is an alias for the same handler so the canonical name is
+    available; `/wallet/trace` is the path the manifest declares and keeps
+    working unchanged.
+    """
+    address = req.address
+    labeled = resolve_address(address)
+    wallet_claim = resolve_wallet(address)
+
+    # Both reads are bounded on their own clock, and run CONCURRENTLY. They
+    # share no data and hitting the service deadline turns a good answer into
+    # `unavailable` with confidence 0, so running them in series only meant the
+    # two budgets could add up past the deadline that kills both.
+    async def _balance():
+        try:
+            return await asyncio.wait_for(
+                balance_snapshot(address, req.chain),
+                timeout=settings.balance_read_budget_s,
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            return BalanceSnapshot(
+                address=address, chain=req.chain, block_number=None,
+                native_symbol=NATIVE_SYMBOL.get(req.chain, "ETH"),
+                native_wei=None, native_amount=None, tokens=[],
+                data_source="unavailable",
+                reason=(
+                    f"provider read exceeded the {settings.balance_read_budget_s:g}s "
+                    "balance budget"
+                ),
+            )
+
+    async def _associations():
+        # Degrades to "not completed in budget", which is a different statement
+        # from "no operator interactions were observed" and must not be
+        # confused with it.
+        try:
+            return await asyncio.wait_for(
+                wallet_trace(address, req.chain), timeout=_ASSOCIATION_BUDGET_S
+            )
+        except Exception:  # noqa: BLE001 - includes TimeoutError
+            return None
+
+    snapshot, trace = await asyncio.gather(_balance(), _associations())
+    associations = trace.associations if trace else []
+    association_status = "complete" if trace else "not_completed_in_budget"
+
+    token_rows = [
+        {
+            "contract": t.contract,
+            "symbol": t.symbol,
+            "decimals": t.decimals,
+            "raw_balance": str(t.raw),
+            "balance": t.amount,
+        }
+        for t in snapshot.tokens
+    ]
+
+    unreadable = snapshot.data_source == "unavailable"
+    if unreadable:
+        confidence = 0.0
+    elif wallet_claim:
+        confidence = wallet_claim[1].confidence
+    else:
+        confidence = 0.9 if association_status == "complete" else 0.7
 
     return _stamp({
-        "address": trace.address,
-        "chain": trace.chain,
-        "balance_native": trace.balance_native,
+        # ── Direct balance facts ─────────────────────────────────────────
+        "address": snapshot.address,
+        "chain": snapshot.chain,
+        "block_number": snapshot.block_number,
+        "native_symbol": snapshot.native_symbol,
+        "native_balance_wei": (
+            str(snapshot.native_wei) if snapshot.native_wei is not None else None
+        ),
+        "native_balance": snapshot.native_amount,
+        # Legacy alias. None (not 0.0) when the provider could not be read, so a
+        # failed read can never be mistaken for an empty wallet.
+        "balance_native": snapshot.native_amount,
+        "token_balances": token_rows,
+        "token_count": len(token_rows),
+        "balance_status": "unavailable" if unreadable else "observed",
+        # ── Derived attribution layer ────────────────────────────────────
         "labeled_casino": labeled.slug if labeled else None,
         "labeled_casino_name": labeled.name if labeled else None,
-        "top_association": trace.casino_slug,
-        "casino_name": trace.casino_name,
-        "associations": trace.associations,
-        "association_count": len(trace.associations),
-        "confidence": max(trace.confidence, wallet_claim[1].confidence if wallet_claim else 0.0),
+        "top_association": trace.casino_slug if trace else None,
+        "casino_name": trace.casino_name if trace else None,
+        "associations": associations,
+        "association_count": len(associations),
+        "association_scan_status": association_status,
+        # ── Contract ─────────────────────────────────────────────────────
+        "confidence": confidence,
         "verdict": (
-            labeled.slug if labeled else (trace.casino_slug or "unlabeled")
+            labeled.slug if labeled
+            else ((trace.casino_slug if trace else None) or "unlabeled")
         ),
-        "reasoning": (
-            f"Address {req.address[:10]}… on {trace.chain} holds "
-            f"{trace.balance_native:.4f} native units. "
-            + (
-                f"Directly labeled as a {labeled.name} wallet. "
-                if labeled
-                else ""
-            )
-            + f"Interacted with {len(trace.associations)} tracked casino "
-              f"cluster(s) in the last 30 days."
+        "reasoning": _balance_reasoning(
+            snapshot, token_rows, labeled, wallet_claim,
+            associations, association_status,
         ),
-        "data_source": trace.data_source,
+        "data_source": snapshot.data_source,
         "classification": "observed" if labeled else "calculated",
         "attribution": ({
             "role": wallet_claim[1].role,
+            "label": wallet_claim[1].label,
+            "confidence": wallet_claim[1].confidence,
+            "source_confidence": wallet_claim[1].source_confidence,
             "evidence_status": wallet_claim[1].evidence_status,
             "evidence": list(wallet_claim[1].evidence),
             "last_reviewed": wallet_claim[1].last_reviewed,
@@ -555,27 +1154,89 @@ async def wallet_trace_endpoint(req: WalletTraceRequest) -> dict[str, Any]:
 # ── FRAUD_DETECTION ──────────────────────────────────────────────────────────
 
 
+# Tiers that mean "review this", used for `is_suspicious` and for the legacy
+# verdict alias. Derived from one place so the boolean, the tier, and the score
+# can never disagree — the previous form tested `verdict not in {...}`, which
+# silently flips to True the moment a new tier name is introduced.
+_ELEVATED_TIERS = {"elevated_risk", "high_risk"}
+
+# Legacy verdict vocabulary, kept so the existing website and the published
+# response schema keep working. `risk_tier` is the canonical field.
+_TIER_TO_LEGACY_VERDICT = {
+    "insufficient_data": "unavailable",
+    "low_risk": "normal",
+    "elevated_risk": "suspicious",
+    "high_risk": "critical",
+}
+
+
 @app.post("/anomaly/check", tags=["FRAUD_DETECTION"])
 async def anomaly_check_endpoint(req: AnomalyRequest) -> dict[str, Any]:
-    """Screen an address for wash-trading, velocity spikes, and sybil patterns."""
-    report = await anomaly_check(req.address, req.chain, req.hours)
+    """Deterministic risk triage for one address, with named evidence.
+
+    Answers with measurements whether or not anything fired: a low-risk verdict
+    that cannot say what was measured is not evidence of anything. The canonical
+    label is `risk_tier`; `verdict` carries the same finding in the older
+    vocabulary so existing consumers keep working.
+    """
+    a = await analytics.risk_assessment(req.address, req.chain, req.hours)
+    is_suspicious = a.risk_tier in _ELEVATED_TIERS
+    reasoning = analytics._risk_reasoning(a)
+
+    # Confidence is about support for THIS answer, not about how risky the
+    # address is. An unreadable provider is 0; a partial page budget is capped;
+    # a complete read of a well-populated window earns the most.
+    if a.data_source == "unavailable":
+        confidence = 0.0
+    elif a.risk_tier == "insufficient_data":
+        confidence = 0.2
+    else:
+        confidence = 0.85 if a.coverage_complete else 0.6
+
     return _stamp({
-        "address": report.address,
-        "chain": report.chain,
-        "verdict": report.verdict,
-        "score": report.score,
-        "is_suspicious": report.verdict not in {"normal", "unavailable"},
-        "signals": report.signals,
-        "signal_count": len(report.signals),
-        "transfers_analyzed": report.transfers_analyzed,
-        "window_hours": req.hours,
-        "confidence": (
-            0.0
-            if report.data_source == "unavailable"
-            else min(0.55 + report.score / 2, 0.95)
+        # ── Direct answer ────────────────────────────────────────────────
+        "address": a.address,
+        "chain": a.chain,
+        "window_hours": a.window_hours,
+        "risk_score": a.risk_score,
+        "risk_tier": a.risk_tier,
+        "is_suspicious": is_suspicious,
+        "verdict": _TIER_TO_LEGACY_VERDICT.get(a.risk_tier, "normal"),
+        # ── Named evidence ───────────────────────────────────────────────
+        "risk_signals": [s.as_dict() for s in a.signals],
+        "signals_fired": [s.name for s in a.signals if s.score > 0],
+        "signals": [  # legacy flat form: name + measurement, fired only
+            f"{s.name}: {s.measurement}" for s in a.signals if s.score > 0
+        ],
+        "signal_count": sum(1 for s in a.signals if s.score > 0),
+        "screens_run": len(a.signals),
+        # ── Measurements ─────────────────────────────────────────────────
+        "transfers_analyzed": a.transfers_analyzed,
+        "inbound_transfers": a.inbound_count,
+        "outbound_transfers": a.outbound_count,
+        # Per token. A single cross-token total would be a sum of different
+        # units — "100 USDT + 0.5 ETH" is not a quantity of anything.
+        "inbound_totals_by_token": a.inbound_by_token,
+        "outbound_totals_by_token": a.outbound_by_token,
+        "distinct_counterparties": a.distinct_counterparties,
+        "top_counterparty_share_pct": a.top_counterparty_share_pct,
+        "top5_counterparty_share_pct": a.top5_counterparty_share_pct,
+        "round_trip_count": a.round_trip_count,
+        "peak_hourly_transfers": a.peak_hourly_transfers,
+        "mean_hourly_transfers": a.mean_hourly_transfers,
+        "max_repeated_amount_count": a.repeated_amount_count,
+        # ── Mitigating context ───────────────────────────────────────────
+        "infrastructure_counterparties": a.infrastructure_counterparties[:10],
+        "operator_counterparties": a.operator_counterparties[:10],
+        # ── Contract ─────────────────────────────────────────────────────
+        "confidence": confidence,
+        "reasoning": reasoning,
+        "data_source": a.data_source,
+        "coverage_complete": a.coverage_complete,
+        "caveat": (
+            "Risk tiers rank review priority from observable transfer patterns. "
+            "They are not a finding of fraud and infer no identity or intent."
         ),
-        "reasoning": report.reasoning,
-        "data_source": report.data_source,
     })
 
 
@@ -618,7 +1279,9 @@ async def list_casinos() -> dict[str, Any]:
                         "address": w.address,
                         "chain": w.chain,
                         "role": w.role,
+                        "label": w.label,
                         "confidence": w.confidence,
+                        "source_confidence": w.source_confidence,
                         "evidence_status": w.evidence_status,
                         "evidence": list(w.evidence),
                         "source": w.source,
@@ -804,6 +1467,17 @@ def _flow_confidence(source: str, complete: bool) -> float:
     return round(base, 3)
 
 
+def _search_confidence(result: dict[str, Any]) -> float:
+    """Confidence that the DISCOVERY SEARCH ran and covered the cluster.
+
+    Never a statement about any candidate's ownership — the ceiling for that is
+    published separately as `max_recommended_confidence`.
+    """
+    if result.get("data_source") == "unavailable":
+        return 0.0
+    return 0.6 if result.get("coverage_complete", True) else 0.36
+
+
 # ── Player evaluation ────────────────────────────────────────────────────────
 #
 # Net position against attributed operator clusters. Deliberately NOT called
@@ -843,7 +1517,7 @@ async def player_evaluate_endpoint(req: PlayerEvaluateRequest) -> dict[str, Any]
 
     if p.transfers_with_operators == 0:
         reasoning = (
-            f"No transfers between {req.address[:10]}… and any attributed operator "
+            f"No transfers between {req.address} and any attributed operator "
             f"cluster in {req.hours}h. This covers only clusters we have labeled — "
             f"activity with unattributed operators would not appear."
         )
@@ -966,19 +1640,31 @@ async def attribution_discover_endpoint(
         })
 
     strong = sum(1 for c in result["candidates"] if c["strength"] >= 0.7)
+    searched = result.get("data_source") != "unavailable"
     return _stamp({
         **result,
-        # Confidence describes the SEARCH, not ownership of any candidate.
-        "confidence": 0.6,
-        "verdict": f"{len(result['candidates'])}_candidates_{strong}_strong",
-        "reasoning": (
-            f"Examined {result['counterparties_examined']} counterparties of "
-            f"{result['name']}'s {result['known_clusters']} known cluster(s) over "
-            f"{hours}h and shortlisted {result['candidates_shortlisted']}. "
-            f"{len(result['candidates'])} candidate(s) returned, {strong} rated strong. "
-            f"These are review candidates — on-chain behaviour never proves ownership."
+        # Confidence describes the SEARCH, not ownership of any candidate — and
+        # a search that never ran cannot support even that.
+        "confidence": _search_confidence(result),
+        "verdict": (
+            f"{len(result['candidates'])}_candidates_{strong}_strong" if searched
+            else "search_pending"
         ),
-        "data_source": "derived",
+        "reasoning": (
+            (
+                f"Examined {result['counterparties_examined']} counterparties of "
+                f"{result['name']}'s {result['known_clusters']} known cluster(s) over "
+                f"{hours}h and shortlisted {result['candidates_shortlisted']}. "
+                f"{len(result['candidates'])} candidate(s) returned, {strong} rated "
+                f"strong. These are review candidates — on-chain behaviour never "
+                f"proves ownership."
+            ) if searched else (
+                f"No completed discovery pass over {result['name']}'s clusters is "
+                f"cached for {hours}h; one is in progress. An empty candidate list "
+                f"here means nothing was searched, not that nothing was found. "
+                f"On-chain behaviour never proves ownership."
+            )
+        ),
     })
 
 
@@ -990,15 +1676,19 @@ async def attribution_discover_all_endpoint(
     hours = max(1, min(hours, 720))
     per_operator = max(1, min(per_operator, 20))
     result = await attribution.discover_all(hours, per_operator)
+    searched = result.get("data_source") != "unavailable"
     return _stamp({
         **result,
-        "confidence": 0.6,
+        "confidence": _search_confidence(result),
         "verdict": (
             f"{result['candidates_proposed']}_candidates_"
-            f"{result['strong_candidates']}_strong"
+            f"{result['strong_candidates']}_strong" if searched
+            else "search_pending"
         ),
-        "reasoning": result["note"],
-        "data_source": "derived",
+        "reasoning": result["note"] if searched else (
+            "No completed discovery pass across the attributed operators is cached "
+            "for this window; one is in progress. Retry shortly."
+        ),
     })
 
 

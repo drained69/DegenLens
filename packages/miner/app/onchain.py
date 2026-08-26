@@ -19,7 +19,10 @@ import asyncio
 import hashlib
 import random
 import time
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -30,6 +33,142 @@ from .settings import settings
 # Bound concurrent upstream calls so a burst of requests can't open hundreds of
 # sockets against Alchemy and trip its own rate limiter.
 _upstream_sem = asyncio.Semaphore(settings.max_upstream_concurrency)
+# Background cache rebuilds read the whole registry and would otherwise hold
+# every upstream slot for minutes, starving the single-operator endpoints that
+# still read live. Gating them behind a second, narrower semaphore caps how
+# much of the shared budget they can hold at once, so foreground requests keep
+# making progress while a rebuild runs.
+_background_sem = asyncio.Semaphore(settings.max_background_upstream_concurrency)
+_is_background: ContextVar[bool] = ContextVar("upstream_is_background", default=False)
+
+
+_request_deadline_at: ContextVar[float | None] = ContextVar(
+    "request_deadline_at", default=None
+)
+
+
+@contextmanager
+def request_deadline(seconds: float) -> Iterator[None]:
+    """Bound every upstream read in this request to `seconds` from now.
+
+    Retries used to be counted in attempts, not time: three attempts at the
+    per-call timeout could spend more than twice the service deadline on a
+    single wallet, so the request was already lost before the last try began.
+    """
+    token = _request_deadline_at.set(time.monotonic() + seconds)
+    try:
+        yield
+    finally:
+        _request_deadline_at.reset(token)
+
+
+def remaining_request_time() -> float | None:
+    """Seconds left for upstream work, or None when unbounded (background)."""
+    at = _request_deadline_at.get()
+    if at is None:
+        return None
+    return max(0.0, at - time.monotonic())
+
+
+# Time a further page needs to be worth starting: one call plus a margin to
+# serialize the response.
+_PAGE_TIME_RESERVE_S = 2.0
+
+
+def upstream_call_timeout() -> float:
+    """Per-call timeout, never longer than the time the request has left."""
+    remaining = remaining_request_time()
+    if remaining is None:
+        return settings.upstream_timeout_s
+    return max(0.5, min(settings.upstream_timeout_s, remaining))
+
+
+def should_retry_upstream(attempt: int, delay: float) -> bool:
+    """Whether another attempt can still finish inside the request budget."""
+    remaining = remaining_request_time()
+    if remaining is None:
+        return True
+    # Needs the backoff plus a usable slice of call time to be worth starting.
+    return remaining > delay + 1.0
+
+
+@contextmanager
+def background_reads() -> Iterator[None]:
+    """Mark everything read in this context as deprioritised background work."""
+    token = _is_background.set(True)
+    try:
+        yield
+    finally:
+        _is_background.reset(token)
+
+
+_foreground_inflight = 0
+
+
+@asynccontextmanager
+async def upstream_slot() -> AsyncIterator[None]:
+    """Acquire the shared upstream budget, yielding to foreground reads.
+
+    Capping how many background reads run at once was not enough on its own:
+    one cache-warming read still holds a provider slot for seconds at a time,
+    and a live request that has to queue behind it can burn its whole deadline
+    and answer `unavailable`. So a background read also waits for the live
+    traffic to clear before it takes a slot. The wait is bounded — under
+    sustained traffic the warm would otherwise never run, and a cache that
+    never fills is the problem it was added to solve.
+    """
+    global _foreground_inflight
+    if _is_background.get():
+        async with _background_sem:
+            waited = 0.0
+            poll = settings.background_yield_poll_s
+            while _foreground_inflight > 0 and waited < settings.background_yield_max_s:
+                await asyncio.sleep(poll)
+                waited += poll
+            async with _upstream_sem:
+                yield
+    else:
+        _foreground_inflight += 1
+        try:
+            async with _upstream_sem:
+                yield
+        finally:
+            _foreground_inflight -= 1
+
+
+_page_limit: ContextVar[int | None] = ContextVar("transfer_page_limit", default=None)
+# A REDUCED budget, distinct from `_page_limit`. Kept separate because
+# `_page_limit` also means "this is a full scan" to `is_full_scan()`; reusing it
+# to shrink a read would make a truncated window claim complete coverage.
+_page_budget: ContextVar[int | None] = ContextVar("transfer_page_budget", default=None)
+
+
+@contextmanager
+def page_budget(pages: int) -> Iterator[None]:
+    """Cap pagination depth for reads that do not need full history.
+
+    Some questions are answered by the most recent slice — whether an address
+    ever touched a known cluster, say — and paging tens of thousands of rows to
+    answer them costs seconds and still ends truncated. A shallower read is not
+    less honest: it reports `coverage_complete: false` exactly as the deep one
+    did, and the counts it produces are documented lower bounds either way.
+    """
+    token = _page_budget.set(pages)
+    try:
+        yield
+    finally:
+        _page_budget.reset(token)
+
+
+def transfer_page_limit() -> int:
+    full = _page_limit.get()
+    if full is not None:
+        return full
+    return _page_budget.get() or settings.max_transfer_pages
+
+
+def is_full_scan() -> bool:
+    return _page_limit.get() is not None
 
 
 @dataclass
@@ -72,6 +211,19 @@ def merge_cluster_reads(sets: list[TransferSet]) -> tuple[str, bool]:
 
 
 @dataclass
+class TokenTransfer:
+    """One ERC-20 Transfer event decoded from the receipt logs."""
+
+    contract: str
+    symbol: str | None
+    decimals: int | None
+    from_addr: str
+    to_addr: str
+    raw_amount: int
+    amount: float | None
+
+
+@dataclass
 class TransactionRecord:
     tx_hash: str
     chain: str
@@ -86,6 +238,21 @@ class TransactionRecord:
     gas_price_wei: int
     input: str
     data_source: str
+    # Receipt facts. The receipt was already being fetched for `status` and then
+    # discarded; these are the canonical cost fields a transaction lookup is
+    # actually asked for, and they cost no extra upstream call.
+    gas_used: int | None = None
+    effective_gas_price_wei: int | None = None
+    fee_wei: int | None = None
+    fee_native: float | None = None
+    nonce: int | None = None
+    transaction_index: int | None = None
+    # Set when the transaction deployed a contract.
+    contract_address: str | None = None
+    # First 4 bytes of calldata; identifies the method invoked.
+    method_id: str | None = None
+    block_timestamp: str | None = None
+    token_transfers: list["TokenTransfer"] = field(default_factory=list)
 
 
 def stable_seed(*parts: str) -> int:
@@ -164,6 +331,9 @@ NATIVE_SYMBOL = {
     "polygon": "POL",
     "bsc": "BNB",
     "avalanche": "AVAX",
+    "solana": "SOL",
+    "tron": "TRX",
+    "bitcoin": "BTC",
 }
 
 SUPPORTED_CHAINS = tuple(_ALCHEMY_HOSTS)
@@ -183,7 +353,7 @@ def is_evm_chain(chain: str) -> bool:
 async def _fetch_solana(address: str, since: datetime) -> TransferSet:
     """Read native SOL movements through the public Solana JSON-RPC API."""
     try:
-        async with _upstream_sem:
+        async with upstream_slot():
             async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
                 response = await client.post(
                     settings.solana_rpc_url,
@@ -199,7 +369,7 @@ async def _fetch_solana(address: str, since: datetime) -> TransferSet:
                 # Public Solana RPCs rate-limit transaction hydration. A small
                 # bounded sample is preferable to turning the whole chain into
                 # unavailable after hundreds of rejected requests.
-                max_signatures = min(settings.max_transfer_pages * 100, 25)
+                max_signatures = min(transfer_page_limit() * 100, 25)
                 signatures = signatures[:max_signatures]
                 complete = len(signatures) < max_signatures
 
@@ -284,7 +454,11 @@ async def _fetch_solana(address: str, since: datetime) -> TransferSet:
                     if transfer is not None
                 ]
                 _record_upstream_result(ok=True, chain="solana")
-                return TransferSet(transfers, "live", complete=complete)
+                return TransferSet(
+                    transfers,
+                    "live",
+                    complete=complete if is_full_scan() else False,
+                )
     except Exception as exc:  # noqa: BLE001 - provider failure is structured
         _record_upstream_result(ok=False, chain="solana")
         return TransferSet([], "unavailable", f"upstream error: {type(exc).__name__}", complete=False)
@@ -293,7 +467,7 @@ async def _fetch_solana(address: str, since: datetime) -> TransferSet:
 async def _fetch_bitcoin(address: str, since: datetime) -> TransferSet:
     """Read native BTC movements through the public Esplora API."""
     try:
-        async with _upstream_sem:
+        async with upstream_slot():
             async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
                 response = await client.get(f"{settings.bitcoin_api_url}/address/{address}/txs")
                 response.raise_for_status()
@@ -333,7 +507,7 @@ async def _fetch_bitcoin(address: str, since: datetime) -> TransferSet:
 async def _fetch_tron(address: str, since: datetime) -> TransferSet:
     """Read TRX and TRC-20 movements through TronGrid's public REST API."""
     try:
-        async with _upstream_sem:
+        async with upstream_slot():
             async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
                 response = await client.get(
                     f"{settings.tron_api_url}/v1/accounts/{address}/transactions",
@@ -442,7 +616,16 @@ async def _alchemy_transfers_paged(
     rows: list[dict] = []
     page_key: str | None = None
 
-    for _ in range(settings.max_transfer_pages):
+    for page in range(transfer_page_limit()):
+        # The page budget bounds how MUCH we read; the request deadline bounds
+        # how LONG. A busy address can exhaust the clock long before the pages,
+        # and a truncated read delivered on time beats a complete one delivered
+        # after the caller gave up — provided it is reported as truncated, which
+        # returning complete=False here does.
+        if page and remaining_request_time() is not None:
+            if remaining_request_time() < _PAGE_TIME_RESERVE_S:
+                return rows, False
+
         params: dict[str, object] = {
             key: address,
             "category": ["external", "erc20"],
@@ -455,19 +638,29 @@ async def _alchemy_transfers_paged(
         if page_key:
             params["pageKey"] = page_key
 
-        r = await client.post(
-            url,
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "alchemy_getAssetTransfers",
-                "params": [params],
-            },
-        )
-        r.raise_for_status()
-        payload = r.json()
-        if "error" in payload:
-            raise httpx.HTTPError(str(payload["error"]))
+        try:
+            r = await client.post(
+                url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "alchemy_getAssetTransfers",
+                    "params": [params],
+                },
+            )
+            r.raise_for_status()
+            payload = r.json()
+            if "error" in payload:
+                raise httpx.HTTPError(str(payload["error"]))
+        except Exception:
+            # Keep what we already paged. Discarding it turned a rate-limited
+            # page N into a zero-transfer, zero-confidence answer even though
+            # pages 1..N-1 were real observations — the difference between a
+            # partial answer and no answer at all. With nothing in hand there
+            # is nothing to salvage, so let the caller retry the whole read.
+            if rows:
+                return rows, False
+            raise
 
         result = payload.get("result") or {}
         batch = result.get("transfers", [])
@@ -483,6 +676,30 @@ async def _alchemy_transfers_paged(
 
     # Ran out of page budget with more data still available upstream.
     return rows, False
+
+
+def _retry_delay(exc: Exception, attempt: int) -> float:
+    """How long to wait before retrying a failed upstream read.
+
+    The old fixed 0.25s/0.5s ladder was shorter than any real rate-limit
+    window, so all three attempts landed inside the same 429 and the read was
+    reported unavailable — a zero-confidence answer caused by backing off too
+    little rather than by missing data. Honour `Retry-After` when the provider
+    sends one, otherwise back off exponentially with jitter so concurrent
+    wallet reads do not retry in lockstep.
+    """
+    response = getattr(exc, "response", None)
+    if response is not None:
+        header = response.headers.get("Retry-After")
+        if header:
+            try:
+                return min(float(header), settings.max_retry_delay_s)
+            except ValueError:
+                pass
+    # Jitter first, then clamp — clamping first let the jitter multiplier push
+    # the delay back over the ceiling the setting is supposed to guarantee.
+    backoff = settings.retry_base_delay_s * (2 ** attempt) * (0.5 + random.random())
+    return min(backoff, settings.max_retry_delay_s)
 
 
 async def _fetch_live(address: str, chain: str, since: datetime) -> TransferSet:
@@ -506,17 +723,18 @@ async def _fetch_live(address: str, chain: str, since: datetime) -> TransferSet:
         # alone would produce asymmetric inbound/outbound totals.
         for attempt in range(3):
             try:
-                async with _upstream_sem:
-                    async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                async with upstream_slot():
+                    async with httpx.AsyncClient(timeout=upstream_call_timeout()) as client:
                         (inbound, in_ok), (outbound, out_ok) = await asyncio.gather(
                             _alchemy_transfers_paged(client, url, address, "in", since),
                             _alchemy_transfers_paged(client, url, address, "out", since),
                         )
                 break
-            except Exception:
-                if attempt == 2:
+            except Exception as exc:
+                delay = _retry_delay(exc, attempt)
+                if attempt == 2 or not should_retry_upstream(attempt, delay):
                     raise
-                await asyncio.sleep(0.25 * (attempt + 1))
+                await asyncio.sleep(delay)
     except Exception as exc:  # noqa: BLE001 - upstream failures must not 500
         _record_upstream_result(ok=False, chain=chain)
         return TransferSet(
@@ -652,13 +870,19 @@ async def get_transfers(address: str, chain: str, hours: int) -> TransferSet:
 
     since = now - timedelta(hours=hours)
 
-    if not settings.chain_live_data_available(chain):
-        result = TransferSet([], "unavailable", "live provider required for chain", complete=False)
-    elif not settings.live_data_available and chain in _ALCHEMY_HOSTS:
+    # Order matters. The demo check has to come FIRST: with no provider key
+    # configured, `chain_live_data_available` is false for every chain, so
+    # testing it first made the demo branch unreachable and turned local
+    # development into a uniform "unavailable" feed. Chains the EVM adapter
+    # would otherwise cover fall back to labeled synthetic data; chains with no
+    # adapter at all stay honestly unavailable.
+    if not settings.live_data_available and chain in _ALCHEMY_HOSTS:
         if settings.strict_mode:
             result = TransferSet([], "unavailable", "strict_mode: no live data provider")
         else:
             result = _demo_transfers(address, chain, since, now)
+    elif not settings.chain_live_data_available(chain):
+        result = TransferSet([], "unavailable", "live provider required for chain", complete=False)
     else:
         result = await _fetch_live(address, chain, since)
 
@@ -677,13 +901,68 @@ async def get_transfers(address: str, chain: str, hours: int) -> TransferSet:
 
 async def native_balance(address: str, chain: str) -> tuple[float, str]:
     """Native token balance. Returns (balance, data_source)."""
-    if chain in {"solana", "tron", "bitcoin"}:
-        return 0.0, "live" if settings.live_data_available else "unavailable"
+    if chain == "solana":
+        if not settings.live_data_available:
+            if settings.strict_mode:
+                return 0.0, "unavailable"
+            rng = random.Random(stable_seed(address.lower(), chain, "balance"))
+            return round(rng.uniform(100, 50_000), 6), "demo"
+        try:
+            async with upstream_slot():
+                async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                    response = await client.post(
+                        settings.solana_rpc_url,
+                        json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]},
+                    )
+                    response.raise_for_status()
+                    value = response.json().get("result", {}).get("value")
+                    if value is None:
+                        raise ValueError("missing Solana balance")
+            _record_upstream_result(ok=True, chain=chain)
+            return int(value) / 1e9, "live"
+        except Exception:  # noqa: BLE001
+            _record_upstream_result(ok=False, chain=chain)
+            return 0.0, "unavailable"
+    if chain == "tron":
+        if not settings.live_data_available:
+            if settings.strict_mode:
+                return 0.0, "unavailable"
+            rng = random.Random(stable_seed(address.lower(), chain, "balance"))
+            return round(rng.uniform(100, 50_000), 6), "demo"
+        try:
+            async with upstream_slot():
+                async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                    response = await client.get(f"{settings.tron_api_url.rstrip('/')}/v1/accounts/{address}")
+                    response.raise_for_status()
+                    rows = response.json().get("data") or []
+                    value = rows[0].get("balance", 0) if rows else 0
+            _record_upstream_result(ok=True, chain=chain)
+            return int(value) / 1e6, "live"
+        except Exception:  # noqa: BLE001
+            _record_upstream_result(ok=False, chain=chain)
+            return 0.0, "unavailable"
+    if chain == "bitcoin":
+        if not settings.live_data_available:
+            if settings.strict_mode:
+                return 0.0, "unavailable"
+            rng = random.Random(stable_seed(address.lower(), chain, "balance"))
+            return round(rng.uniform(0.01, 20), 8), "demo"
+        try:
+            async with upstream_slot():
+                async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                    response = await client.get(f"{settings.bitcoin_api_url.rstrip('/')}/address/{address}")
+                    response.raise_for_status()
+                    stats = response.json().get("chain_stats", {})
+            funded = int(stats.get("funded_txo_sum", 0))
+            spent = int(stats.get("spent_txo_sum", 0))
+            _record_upstream_result(ok=True, chain=chain)
+            return max(funded - spent, 0) / 1e8, "live"
+        except Exception:  # noqa: BLE001
+            _record_upstream_result(ok=False, chain=chain)
+            return 0.0, "unavailable"
     if not is_evm_chain(chain):
-        # Non-EVM registry entries (bitcoin, solana, tron) cannot be read with
-        # the Alchemy EVM API. Return a clean degradation instead of raising —
-        # a raise here bubbles all the way to a 200 with confidence 0 and
-        # deflates every aggregate that iterates the whole registry.
+        # Keep unknown registry entries explicit instead of letting an adapter
+        # exception deflate an aggregate that iterates the whole registry.
         return 0.0, "unsupported_chain"
     if not settings.live_data_available:
         if settings.strict_mode:
@@ -697,7 +976,7 @@ async def native_balance(address: str, chain: str) -> tuple[float, str]:
     url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
     body = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [address, "latest"]}
     try:
-        async with _upstream_sem:
+        async with upstream_slot():
             async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
                 r = await client.post(url, json=body)
                 r.raise_for_status()
@@ -708,6 +987,211 @@ async def native_balance(address: str, chain: str) -> tuple[float, str]:
 
     _record_upstream_result(ok=True, chain=chain)
     return int(hex_wei, 16) / 1e18, "live"
+
+
+# keccak256("Transfer(address,address,uint256)") — the ERC-20 transfer topic.
+_ERC20_TRANSFER_TOPIC = (
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+)
+
+
+def _hex_int(value: object) -> int | None:
+    """Parse an RPC hex quantity, returning None rather than guessing a zero.
+
+    None and 0 are different answers here: a pending transaction has no
+    `gasUsed`, and reporting that as 0 would state that it consumed no gas.
+    """
+    if not isinstance(value, str) or not value.startswith("0x"):
+        return None
+    try:
+        return int(value, 16)
+    except ValueError:
+        return None
+
+
+def _topic_address(topic: object) -> str | None:
+    """The low 20 bytes of a 32-byte log topic, as a 0x address."""
+    if not isinstance(topic, str) or len(topic) < 42:
+        return None
+    return "0x" + topic[-40:].lower()
+
+
+def _decode_token_transfers(receipt: dict, chain: str) -> list[TokenTransfer]:
+    """Decode ERC-20 Transfer events from receipt logs.
+
+    The logs are already in hand from the receipt call, so this adds no upstream
+    cost. Where the contract is one we hold metadata for, the amount is scaled
+    to human units; where it is not, `raw_amount` is still exact and `amount`
+    stays None rather than assuming 18 decimals — a wrong scale is a wrong
+    number, and 6-decimal stablecoins are the common case.
+    """
+    logs = receipt.get("logs")
+    if not isinstance(logs, list):
+        return []
+    known = KNOWN_TOKENS.get(chain, {})
+    out: list[TokenTransfer] = []
+    for log in logs[:50]:  # bound: a batch transfer can carry hundreds
+        if not isinstance(log, dict):
+            continue
+        topics = log.get("topics")
+        if not isinstance(topics, list) or len(topics) < 3:
+            continue
+        if not isinstance(topics[0], str) or topics[0].lower() != _ERC20_TRANSFER_TOPIC:
+            continue
+        contract = (log.get("address") or "").lower()
+        sender = _topic_address(topics[1])
+        recipient = _topic_address(topics[2])
+        raw = _hex_int(log.get("data"))
+        if sender is None or recipient is None or raw is None:
+            continue
+        symbol, decimals = known.get(contract, (None, None))
+        out.append(
+            TokenTransfer(
+                contract=contract,
+                symbol=symbol,
+                decimals=decimals,
+                from_addr=sender,
+                to_addr=recipient,
+                raw_amount=raw,
+                amount=(raw / (10 ** decimals)) if decimals is not None else None,
+            )
+        )
+    return out
+
+
+async def native_balance_wei(address: str, chain: str) -> tuple[int | None, str]:
+    """Native balance in EXACT base units.
+
+    `native_balance` divides by 1e18 and returns a float, which is lossy at wei
+    scale: 999999999999999999 wei round-trips to 1000000000000000000, reporting
+    a whole extra unit the wallet does not have. Balance is the answer this
+    intent exists to give, so the integer the chain actually returned is read
+    here and never reconstructed from the float.
+
+    Returns (wei, source). `None` on failure — never 0.
+    """
+    if chain not in _ALCHEMY_HOSTS:
+        # Non-EVM adapters return floats natively; scale them and accept the
+        # precision they were given rather than pretending to more.
+        amount, source = await native_balance(address, chain)
+        if source == "unavailable":
+            return None, source
+        decimals = {"solana": 9, "tron": 6, "bitcoin": 8}.get(chain, 18)
+        return int(round(amount * (10 ** decimals))), source
+
+    if not settings.live_data_available:
+        if settings.strict_mode:
+            return None, "unavailable"
+        amount, source = await native_balance(address, chain)
+        return (None if source == "unavailable" else int(round(amount * 1e18))), source
+
+    if _circuit_open(chain):
+        return None, "unavailable"
+
+    url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
+    body = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [address, "latest"]}
+    try:
+        async with upstream_slot():
+            async with httpx.AsyncClient(timeout=upstream_call_timeout()) as client:
+                r = await client.post(url, json=body)
+                r.raise_for_status()
+                hex_wei = r.json().get("result")
+        if not isinstance(hex_wei, str):
+            raise ValueError("missing balance result")
+    except Exception:  # noqa: BLE001
+        _record_upstream_result(ok=False, chain=chain)
+        return None, "unavailable"
+    _record_upstream_result(ok=True, chain=chain)
+    return int(hex_wei, 16), "live"
+
+
+@dataclass
+class BalanceSnapshot:
+    """A wallet's holdings right now, with the block the read was taken at.
+
+    Split out from `wallet_trace` because a balance question and an attribution
+    question have very different costs. The balance is two RPC calls; the
+    30-day association scan is a paged transfer crawl that took the median
+    `/wallet/trace` response to ~7s. Blocking an exact, cheap, directly
+    observable fact behind an expensive derived one is what made the balance
+    intent slow, and slow answers are scored as failures.
+    """
+
+    address: str
+    chain: str
+    block_number: int | None
+    native_symbol: str
+    native_wei: int | None
+    native_amount: float | None
+    tokens: list[TokenBalance]
+    data_source: str
+    reason: str | None = None
+
+
+async def balance_snapshot(address: str, chain: str, include_tokens: bool = True) -> BalanceSnapshot:
+    """Direct balance facts for one address. No attribution, no transfer crawl.
+
+    A provider failure returns `native_wei=None` with `data_source="unavailable"`
+    — never 0. Reporting an unreadable provider as a zero balance is the single
+    most damaging thing a balance endpoint can do: it is indistinguishable from
+    a real empty wallet and it is wrong.
+    """
+    symbol = NATIVE_SYMBOL.get(chain, "ETH")
+
+    if chain not in _ALCHEMY_HOSTS and chain not in {"solana", "tron", "bitcoin"}:
+        return BalanceSnapshot(
+            address=address, chain=chain, block_number=None, native_symbol=symbol,
+            native_wei=None, native_amount=None, tokens=[],
+            data_source="unavailable", reason=f"no configured provider for chain: {chain}",
+        )
+
+    async def _block() -> int | None:
+        """Read block height alongside the balance so the answer can say what
+        state it reflects. Best-effort: a missing height must not lose the
+        balance itself."""
+        if chain not in _ALCHEMY_HOSTS or not settings.live_data_available:
+            return None
+        try:
+            url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
+            async with httpx.AsyncClient(timeout=upstream_call_timeout()) as client:
+                result = await _rpc(client, url, "eth_blockNumber", [])
+            return int(result, 16) if isinstance(result, str) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    native_task = native_balance_wei(address, chain)
+    token_task = token_balances(address, chain) if include_tokens else None
+
+    if token_task is not None:
+        (wei, native_source), (tokens, token_source), block = await asyncio.gather(
+            native_task, token_task, _block()
+        )
+    else:
+        (wei, native_source), block = await asyncio.gather(native_task, _block())
+        tokens, token_source = [], native_source
+
+    if native_source == "unavailable" or wei is None:
+        return BalanceSnapshot(
+            address=address, chain=chain, block_number=block, native_symbol=symbol,
+            native_wei=None, native_amount=None, tokens=tokens,
+            data_source="unavailable",
+            reason="native balance provider unavailable; balance is unknown, not zero",
+        )
+
+    decimals = {"solana": 9, "tron": 6, "bitcoin": 8}.get(chain, 18)
+    return BalanceSnapshot(
+        address=address,
+        chain=chain,
+        block_number=block,
+        native_symbol=symbol,
+        native_wei=wei,
+        # Convenience float for existing consumers. `native_wei` is canonical:
+        # this loses precision at wei scale by construction.
+        native_amount=wei / (10 ** decimals),
+        tokens=tokens,
+        data_source=native_source,
+        reason=None if token_source == native_source else f"token balances {token_source}",
+    )
 
 
 async def transaction_lookup(tx_hash: str, chain: str) -> tuple[TransactionRecord | None, str]:
@@ -721,12 +1205,31 @@ async def transaction_lookup(tx_hash: str, chain: str) -> tuple[TransactionRecor
 
     url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
     try:
-        async with _upstream_sem:
-            async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+        async with upstream_slot():
+            async with httpx.AsyncClient(timeout=upstream_call_timeout()) as client:
                 tx, receipt = await asyncio.gather(
                     _rpc(client, url, "eth_getTransactionByHash", [tx_hash]),
                     _rpc(client, url, "eth_getTransactionReceipt", [tx_hash]),
                 )
+                # The block header carries the timestamp, which is one of the
+                # facts a transaction lookup is most often asked for and is not
+                # present on either the transaction or the receipt. Fetched only
+                # once the transaction is known to exist and to be mined, and
+                # allowed to fail on its own: a missing timestamp must not lose
+                # the answer.
+                block_ts = None
+                if isinstance(tx, dict) and tx.get("blockNumber"):
+                    try:
+                        block = await _rpc(
+                            client, url, "eth_getBlockByNumber",
+                            [tx["blockNumber"], False],
+                        )
+                        if isinstance(block, dict) and block.get("timestamp"):
+                            block_ts = datetime.fromtimestamp(
+                                int(block["timestamp"], 16), tz=timezone.utc
+                            ).isoformat()
+                    except Exception:  # noqa: BLE001
+                        block_ts = None
     except Exception as exc:  # noqa: BLE001
         _record_upstream_result(ok=False, chain=chain)
         return None, f"upstream error: {type(exc).__name__}"
@@ -739,6 +1242,17 @@ async def transaction_lookup(tx_hash: str, chain: str) -> tuple[TransactionRecor
     status = "pending" if status_hex is None else ("confirmed" if status_hex == "0x1" else "reverted")
     block_hex = tx.get("blockNumber")
     value_wei = int(tx.get("value", "0x0"), 16)
+
+    gas_used = _hex_int(receipt_data.get("gasUsed"))
+    # Post-1559 the receipt's effectiveGasPrice is the price actually paid, and
+    # it differs from the transaction's gasPrice on type-2 transactions. Prefer
+    # it, and fall back only when the receipt does not carry one.
+    effective_price = _hex_int(receipt_data.get("effectiveGasPrice"))
+    if effective_price is None:
+        effective_price = _hex_int(tx.get("gasPrice"))
+    fee_wei = gas_used * effective_price if (gas_used is not None and effective_price is not None) else None
+
+    calldata = tx.get("input", "0x") or "0x"
     return TransactionRecord(
         tx_hash=tx.get("hash", tx_hash),
         chain=chain,
@@ -751,8 +1265,18 @@ async def transaction_lookup(tx_hash: str, chain: str) -> tuple[TransactionRecor
         value_native=value_wei / 1e18,
         gas=int(tx.get("gas", "0x0"), 16),
         gas_price_wei=int(tx.get("gasPrice", "0x0"), 16),
-        input=tx.get("input", "0x"),
+        input=calldata,
         data_source="live",
+        gas_used=gas_used,
+        effective_gas_price_wei=effective_price,
+        fee_wei=fee_wei,
+        fee_native=(fee_wei / 1e18) if fee_wei is not None else None,
+        nonce=_hex_int(tx.get("nonce")),
+        transaction_index=_hex_int(tx.get("transactionIndex")),
+        contract_address=(receipt_data.get("contractAddress") or None),
+        method_id=(calldata[:10] if len(calldata) >= 10 else None),
+        block_timestamp=block_ts,
+        token_transfers=_decode_token_transfers(receipt_data, chain),
     ), ""
 
 
@@ -839,6 +1363,70 @@ async def token_balances(address: str, chain: str) -> tuple[list[TokenBalance], 
     Native balance alone badly understates a casino treasury — operators hold
     most reserves in stablecoins. Returns (balances, data_source).
     """
+    if chain == "solana":
+        if not settings.live_data_available:
+            if settings.strict_mode:
+                return [], "unavailable"
+            return [], "demo"
+        symbols = {
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": ("USDC", 6),
+            "Es9vMFrzaCERmJfrF4H2FYDkN7P8Jd7o1i1V5X7tXh": ("USDT", 6),
+        }
+        try:
+            async with upstream_slot():
+                async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                    response = await client.post(
+                        settings.solana_rpc_url,
+                        json={
+                            "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+                            "params": [address, {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}, {"encoding": "jsonParsed"}],
+                        },
+                    )
+                    response.raise_for_status()
+                    rows = response.json().get("result", {}).get("value") or []
+            out = []
+            for row in rows:
+                info = row.get("account", {}).get("data", {}).get("parsed", {}).get("info", {})
+                mint = info.get("mint", "")
+                meta = symbols.get(mint)
+                amount = (info.get("tokenAmount") or {}).get("uiAmount")
+                if meta and amount:
+                    symbol, decimals = meta
+                    out.append(TokenBalance(mint, symbol, decimals, int(float(amount) * 10**decimals), float(amount)))
+            _record_upstream_result(ok=True, chain=chain)
+            return out, "live"
+        except Exception:  # noqa: BLE001
+            _record_upstream_result(ok=False, chain=chain)
+            return [], "unavailable"
+    if chain == "tron":
+        if not settings.live_data_available:
+            if settings.strict_mode:
+                return [], "unavailable"
+            return [], "demo"
+        known = {
+            "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t": ("USDT", 6),
+            "TEkxiTehnz5NbloZphRzA1q5Bq8q8Z2r3": ("USDC", 6),
+        }
+        try:
+            async with upstream_slot():
+                async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                    response = await client.get(f"{settings.tron_api_url.rstrip('/')}/v1/accounts/{address}/trc20")
+                    response.raise_for_status()
+                    rows = response.json().get("data") or []
+            out = []
+            for row in rows:
+                contract = row.get("token_info", {}).get("address", "")
+                meta = known.get(contract)
+                if meta:
+                    symbol, decimals = meta
+                    raw = int(row.get("balance", 0))
+                    if raw > 0:
+                        out.append(TokenBalance(contract.lower(), symbol, decimals, raw, raw / 10**decimals))
+            _record_upstream_result(ok=True, chain=chain)
+            return out, "live"
+        except Exception:  # noqa: BLE001
+            _record_upstream_result(ok=False, chain=chain)
+            return [], "unavailable"
     if not is_evm_chain(chain):
         return [], "unsupported_chain"
     if not settings.live_data_available:
@@ -858,7 +1446,7 @@ async def token_balances(address: str, chain: str) -> tuple[list[TokenBalance], 
 
     url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
     try:
-        async with _upstream_sem:
+        async with upstream_slot():
             async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
                 result = await _rpc(
                     client, url, "alchemy_getTokenBalances", [address, "erc20"]
@@ -972,14 +1560,15 @@ async def probe_activity(address: str, chain: str) -> ActivityProbe:
     try:
         for attempt in range(3):
             try:
-                async with _upstream_sem:
-                    async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+                async with upstream_slot():
+                    async with httpx.AsyncClient(timeout=upstream_call_timeout()) as client:
                         inbound, outbound = await asyncio.gather(one("in"), one("out"))
                 break
             except Exception:
-                if attempt == 2:
+                delay = 0.25 * (attempt + 1)
+                if attempt == 2 or not should_retry_upstream(attempt, delay):
                     raise
-                await asyncio.sleep(0.25 * (attempt + 1))
+                await asyncio.sleep(delay)
     except Exception:  # noqa: BLE001
         _record_upstream_result(ok=False, chain=chain)
         return ActivityProbe(address, chain, False, None, 0, "unavailable")

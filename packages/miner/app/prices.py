@@ -14,12 +14,13 @@ from collections.abc import Iterable
 import httpx
 
 from . import metrics
+from .onchain import upstream_call_timeout
 from .settings import settings
 
 _cache: dict[str, tuple[float, float]] = {}  # symbol -> (price_usd, expiry_monotonic)
 _inflight: dict[str, asyncio.Future] = {}
 
-STABLECOINS = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "USDP", "FDUSD"}
+STABLECOINS = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "USDP", "FDUSD", "FRAX"}
 
 _COINGECKO_IDS = {
     "eth": "ethereum",
@@ -33,6 +34,7 @@ _COINGECKO_IDS = {
     "wbnb": "binancecoin",
     "avax": "avalanche-2",
     "wavax": "avalanche-2",
+    "trx": "tron",
     "arb": "arbitrum",
     "op": "optimism",
     "link": "chainlink",
@@ -49,7 +51,11 @@ async def _fetch_batch(coingecko_ids: list[str]) -> dict[str, float]:
     if settings.coingecko_key:
         params["x_cg_pro_api_key"] = settings.coingecko_key
     try:
-        async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
+        # Bounded by whatever the request has left, not a fixed upstream budget.
+        # CoinGecko's free tier rate-limits hard, and a price lookup that
+        # outlives the deadline costs the whole answer to decorate figures the
+        # caller will never receive.
+        async with httpx.AsyncClient(timeout=upstream_call_timeout()) as client:
             r = await client.get(
                 "https://api.coingecko.com/api/v3/simple/price", params=params
             )

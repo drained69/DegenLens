@@ -33,6 +33,12 @@ def test_dotenv_paths_do_not_depend_on_process_working_directory():
     assert all(path.is_absolute() for path in Settings.model_config["env_file"])
 
 
+def test_live_multi_wallet_reads_use_rate_limit_safe_concurrency():
+    from app.settings import settings
+
+    assert settings.max_upstream_concurrency <= 4
+
+
 # ── Determinism ──────────────────────────────────────────────────────────────
 
 
@@ -175,11 +181,19 @@ def test_observation_targets_use_explicit_wallet_network_pairs():
     assert casino is not None
     targets = observation_targets(casino)
     pairs = {(wallet.address.lower(), wallet.chain) for wallet in targets}
+    # The same EVM address is observed on each network it is separately
+    # claimed on, and only those.
+    assert ("0x6872b6630a3afcd3117191a8403c2002e13df7de", "ethereum") in pairs
     assert ("0x6872b6630a3afcd3117191a8403c2002e13df7de", "bsc") in pairs
     assert ("0x6872b6630a3afcd3117191a8403c2002e13df7de", "polygon") in pairs
-    # Live activity probes may add an explicit cross-chain identity; Ethereum
-    # labels are never mirrored without that separate evidence.
-    assert (casino.wallets[0].address.lower(), "base") in pairs
+
+    # An Ethereum label is never mirrored onto another network without its own
+    # claim. Stake's cold wallet is published on Ethereum only, so expanding it
+    # across the indexed chains would manufacture coverage and emit misleading
+    # zero-flow rows for networks we hold no evidence about.
+    cold = "0xdf1fc5523f2e5ea4f6dac2eaed3263953a391b0c"
+    assert (cold, "ethereum") in pairs
+    assert not [chain for addr, chain in pairs if addr == cold and chain != "ethereum"]
 
 
 def test_supplied_stake_addresses_are_tracked_on_the_declared_chains():
@@ -513,22 +527,35 @@ def test_shuffle_registry_matches_gamstat_cluster_wallets():
     assert {wallet.source for wallet in shuffle.wallets} == {
         "https://gamstat.io/casinos/shuffle"
     }
+    # Every production claim cites Gamstat as its source and carries Gamstat's
+    # own label and confidence, so a reviewer can see exactly what was taken
+    # from upstream and what we added.
+    solana_hot = next(
+        wallet for wallet in shuffle.wallets
+        if wallet.address == "76iXe9yKFDjGv3HicUVVy8AYxHLC71L1wYa12zaZzHHp"
+    )
+    assert solana_hot.label == "Hot Wallet"
+    assert solana_hot.source_confidence == 0.9
+    assert any("Gamstat Shuffle cluster wallet listing" in e for e in solana_hot.evidence)
+    assert any("Gamstat wallet label: Hot Wallet" in e for e in solana_hot.evidence)
+
+    # The retained pre-migration records still carry their explorer URLs.
     assert any(
         "https://solscan.io/account/76iXe9yKFDjGv3HicUVVy8AYxHLC71L1wYa12zaZzHHp"
         in evidence
-        for wallet in shuffle.wallets
+        for wallet in shuffle.legacy_wallets
         for evidence in wallet.evidence
     )
     assert any(
         "https://solscan.io/account/Eq9p5iHVbNR4miwmFMkpuPwLLULZmPTxNUPBgLdNrWYy"
         in evidence
-        for wallet in shuffle.wallets
+        for wallet in shuffle.legacy_wallets
         for evidence in wallet.evidence
     )
     assert any(
         "https://tronscan.org/#/address/TWGSJz33dNGMhQYhSRLSKKUyFNewh8JEnp"
         in evidence
-        for wallet in shuffle.wallets
+        for wallet in shuffle.legacy_wallets
         for evidence in wallet.evidence
     )
 
@@ -670,3 +697,141 @@ def test_root_advertises_supported_intents():
         "WALLET_BALANCE_CHECK",
         "FRAUD_DETECTION",
     }
+
+
+# ── Answer stability and salvage ─────────────────────────────────────────────
+#
+# The scorer grades answers against ground truth: numbers are compared
+# numerically, addresses are matched as position-sensitive entities, and a
+# blank or unavailable answer scores zero. These pin the behaviours that were
+# costing points.
+
+
+def _stats(**kw):
+    from app.analytics import CasinoStats
+
+    base = dict(
+        slug="stake", name="Stake.com", window_hours=24, deposits_usd=0.0,
+        withdrawals_usd=0.0, net_flow_usd=0.0, unique_depositors=0,
+        transaction_count=0, confidence=0.5, data_source="live", wallet_count=1,
+    )
+    base.update(kw)
+    return CasinoStats(**base)
+
+
+def test_a_shallower_reading_never_replaces_a_deeper_one():
+    """Identical questions must not walk backwards as reads race."""
+    from app.analytics import _is_weaker
+
+    deep = _stats(transaction_count=15833, coverage_complete=False)
+    shallow = _stats(transaction_count=110, coverage_complete=False)
+    assert _is_weaker(shallow, deep) is True
+    assert _is_weaker(deep, shallow) is False
+
+    complete = _stats(transaction_count=900, coverage_complete=True)
+    assert _is_weaker(shallow, complete) is True, "partial must not overwrite complete"
+    assert _is_weaker(complete, shallow) is False
+
+
+def test_an_unavailable_reading_never_replaces_a_real_one():
+    from app.analytics import _is_weaker
+
+    real = _stats(transaction_count=500, data_source="live")
+    dead = _stats(transaction_count=0, data_source="unavailable")
+    assert _is_weaker(dead, real) is True
+    assert _is_weaker(real, dead) is False
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_page_keeps_the_pages_already_read():
+    """A 429 on page N must not discard pages 1..N-1.
+
+    Discarding them turned a partially rate-limited read into a zero-transfer,
+    zero-confidence answer — the difference between a partial score and none.
+    """
+    import httpx
+    from datetime import datetime, timedelta, timezone
+    from app.onchain import _alchemy_transfers_paged
+
+    now = datetime.now(timezone.utc)
+    row = {
+        "metadata": {"blockTimestamp": now.isoformat().replace("+00:00", "Z")},
+        "hash": "0xabc", "from": "0x1", "to": "0x2", "asset": "USDC", "value": 5.0,
+    }
+
+    class Resp:
+        def __init__(self, payload=None, status=200):
+            self._p, self.status_code, self.headers = payload, status, {}
+
+        def raise_for_status(self):
+            if self.status_code != 200:
+                raise httpx.HTTPStatusError("429", request=None, response=self)
+
+        def json(self):
+            return self._p
+
+    class Client:
+        def __init__(self, fail_on):
+            self.n, self.fail_on = 0, fail_on
+
+        async def post(self, url, json=None):
+            self.n += 1
+            if self.n >= self.fail_on:
+                return Resp(status=429)
+            return Resp({"result": {"transfers": [row] * 3, "pageKey": "next"}})
+
+    since = now - timedelta(hours=24)
+
+    rows, complete = await _alchemy_transfers_paged(
+        Client(fail_on=2), "http://x", "0x2", "in", since
+    )
+    assert rows, "pages already read were discarded"
+    assert complete is False, "a salvaged partial read must not claim completeness"
+
+    # With nothing in hand there is nothing to salvage — propagate so the
+    # caller's retry ladder still gets a chance.
+    with pytest.raises(httpx.HTTPStatusError):
+        await _alchemy_transfers_paged(
+            Client(fail_on=1), "http://x", "0x2", "in", since
+        )
+
+
+def test_retry_backoff_outlasts_a_rate_limit_window_and_honours_retry_after():
+    """0.25s was shorter than any real 429 window, so all retries landed in it."""
+    import httpx
+    from app.onchain import _retry_delay
+    from app.settings import settings
+
+    class Resp:
+        headers = {"Retry-After": "1.5"}
+
+    exc = httpx.HTTPStatusError("429", request=None, response=Resp())
+    assert _retry_delay(exc, 0) == 1.5, "Retry-After ignored"
+
+    plain = RuntimeError("boom")
+    delays = [_retry_delay(plain, attempt) for attempt in range(3)]
+    assert all(d <= settings.max_retry_delay_s for d in delays), "backoff may not outlive the deadline"
+    assert max(delays) > 0.25, "backoff still shorter than a rate-limit window"
+
+
+def test_reasoning_carries_full_addresses_not_truncated_ones():
+    """The scorer matches addresses positionally; a truncated one cannot match."""
+    body = client.post(
+        "/wallet/trace", json={"address": STAKE_HOT, "chain": "ethereum"}
+    ).json()
+    if body.get("error") or body["data_source"] == "unavailable":
+        pytest.skip("upstream unavailable in this environment")
+    assert STAKE_HOT in body["reasoning"].lower(), body["reasoning"]
+    assert "…" not in body["reasoning"]
+
+
+@pytest.mark.asyncio
+async def test_fraud_reasoning_names_the_subject_and_the_screens_applied():
+    """A clean verdict that does not say what was checked is weak evidence."""
+    report = await anomaly_check(STAKE_HOT, "ethereum", 24)
+    reasoning = report.reasoning.lower()
+    if report.data_source == "unavailable":
+        pytest.skip("upstream unavailable in this environment")
+    assert STAKE_HOT in reasoning
+    for screen in ("wash-trade", "velocity", "sybil"):
+        assert screen in reasoning, f"{screen} screen not named in reasoning"

@@ -13,9 +13,10 @@ on top, to judge miner answers against ground truth.
 
 | Artifact | Intent | Bar to clear | keccak256 |
 |---|---|---|---|
-| `dist/degenlens_onchain_tx_lookup_v6.wasm` | `ONCHAIN_TX_LOOKUP` | champion 642, margin **0.7615** on 15-case comparable subset | `5e7f1952e19f5403e83cd52b1007e86480452471f5074e0a3ca167ed1b146540` |
-| `dist/degenlens_onchain_tx_lookup_v7.wasm` | `ONCHAIN_TX_LOOKUP` | same as v6; next-step candidate with `W_EMB = 0.50` | `969e6e5b1faed8b6072b1e4325972144b4f624fea2dfdee8de404278b124e6f9` |
-| `dist/degenlens_fraud_detection_v1.wasm` | `FRAUD_DETECTION` | champion 63, margin **0.7796** on 15-case subset + spearman ≥ 0.60 on ~32 historical rows | `5fb3bac08f6819dc7c982f0e91b0c4de5207a19b8d5e8a0acf110b93754820cc` |
+| `dist/degenlens_onchain_tx_lookup_v6.wasm` | `ONCHAIN_TX_LOOKUP` | registered as reg 940-something; rejected, lost by **0.011** (0.7507 vs 0.7615). `W_EMB = 0.30`. | `5e7f1952e19f5403e83cd52b1007e86480452471f5074e0a3ca167ed1b146540` |
+| `dist/degenlens_onchain_tx_lookup_v7.wasm` | `ONCHAIN_TX_LOOKUP` | reg 980; rejected, lost by **0.026** (0.7664 vs 0.7923). `W_EMB = 0.50`. | `969e6e5b1faed8b6072b1e4325972144b4f624fea2dfdee8de404278b124e6f9` |
+| `dist/degenlens_onchain_tx_lookup_v8.wasm` | `ONCHAIN_TX_LOOKUP` | reg 986; rejected, lost by **0.034** (0.7443 vs 0.7778). `W_EMB = 0.25`. | `ea9481819cecf27641cd33edbe33d9acded9476b1f79473b32efd5bf916c06ae` |
+| `dist/degenlens_fraud_detection_v1.wasm` | `FRAUD_DETECTION` | **not yet registered.** Bar: candidate_margin > **0.7796** on 15-case subset; spearman ≥ 0.60 only kicks in once the candidate has ≥ 1 historical row (channel-49 rejections in the ledger show spearman gating from 32+ rows). `W_EMB = 0.30` recipe. | `5fb3bac08f6819dc7c982f0e91b0c4de5207a19b8d5e8a0acf110b93754820cc` |
 
 The scoring core is derived from
 [`zkasuran/telegraph-salience-scorer`](https://github.com/zkasuran/telegraph-salience-scorer)
@@ -41,13 +42,19 @@ transformer/embedding family), overall `eval_score` **0.7923** across 15
 comparable cases. Champion margin on the subset a new candidate is scored
 against is recomputed per candidate — for v6 it was **0.7615**.
 
-| reg | build | W_EMB | node `candidate_margin` | outcome |
-|---|---|---|---|---|
-| 551 | v2 | 0.0 | 0.5967 | briefly champion, superseded |
-| 710 | v4 | 0.0 | 0.5292 | rejected — regressed on the real benchmark despite scoring 0.9453 on the old local proxy |
-| 810 | v5 | 0.0 | — | stuck `pending` on `gateway.pinata.cloud`; every evaluated candidate is on `raw.githubusercontent.com` or a plain HTTPS host, never Pinata |
-| — | **v6** | 0.30 | **0.7507** | rejected — lost by **0.011** to champion 642's 0.7615 on separation. **+22 pts on the real benchmark over v4.** |
-| — | v7 | 0.50 | pending | single-lever extension of the gradient v6 opened; champion's own recipe is 75 % embedding |
+| reg | build | W_EMB | node `candidate_margin` | champion_margin (same subset) | gap | outcome |
+|---|---|---|---|---|---|---|
+| 551 | v2 | 0.0 | 0.5967 | — | — | briefly champion, superseded |
+| 710 | v4 | 0.0 | 0.5292 | — | large | rejected — regressed on the real benchmark despite scoring 0.9453 on the old local proxy |
+| 810 | v5 | 0.0 | — | — | — | stuck `pending` on `gateway.pinata.cloud`; every evaluated candidate is on `raw.githubusercontent.com` or a plain HTTPS host, never Pinata |
+| — | **v6** | 0.30 | 0.7507 | 0.7615 | **−0.011** | rejected — but **+22 pts on the real benchmark over v4**. Closest we've come. |
+| 980 | v7 | 0.50 | 0.7664 | 0.7923 | −0.026 | rejected. Coverage rose (15/15 cases) but subset became harder — champion looks better on the extra cases than we do. |
+| 986 | v8 | 0.25 | 0.7443 | 0.7778 | −0.034 | rejected. Step *below* v6 also widened gap. **v6 is the peak on the W_EMB axis; neither direction improves it.** |
+
+**Where the W_EMB gradient goes from here:** nowhere useful. v6 → v7 (+0.20) and v6 → v8 (−0.05) both widened the gap. The axis is fully explored. Further improvement needs a different lever:
+
+1. **Architectural.** The current blend `raw = (1-W)·lex + W·sc` drags high-precision paraphrases (case-20 style: identical facts, one different word) *down* when the embedding cosine is weaker than the lexical score. A monotone-lift blend `raw = max(raw, W·sc + (1-W)·raw)` (never depresses) would preserve those cases while still lifting cases where lexical is weak but topical similarity is strong.
+2. **Retrained vectors.** The 794 KB int8 50-dim table caps how well embeddings can carry paraphrase equivalence. Champion 642's 24 MB transformer sees them as identical (1.00); ours reads 0.5-ish and drags the linear blend. A wider, better-trained `vectors.bin` is the real fix but a separate build project.
 
 ### FRAUD_DETECTION registrations
 
@@ -55,20 +62,38 @@ Live champion: **registration 63** (zkasuran, same 1.04 MB salience-family
 architecture as ours — not the big `xfmr` model), `eval_score` **0.7890** over
 32 cases. Champion margin on a challenger's 15-case subset is **0.7796**.
 
-Two gates. Every rejected candidate on the leaderboard falls into one bucket
-or the other:
+Two gates, verified against the live leaderboard:
 
-- **Margin gate**: `candidate_margin` > `champion_margin` on the 15-case
-  comparable subset. Reg 941 lost with 0.7648, reg 903 with 0.7125.
-- **Spearman gate**: rank agreement ≥ 0.60 with the champion across ~32
-  historical real-traffic answers. Reg 955 aced margin at **1.0000** but
-  hit spearman **0.4411**; reg 608 hit **0.9999** margin and spearman
-  **0.2423**. Binary-shaped scorers ace margin and fail spearman.
+- **Margin gate.** `candidate_margin` > `champion_margin` (0.7796) on the
+  15-case comparable subset. Reg 941 lost outright with 0.7648 (`hist_rows=0`,
+  so no spearman was even computed — margin failure was terminal).
+- **Spearman gate.** Only runs once a candidate has ≥ 1 historical
+  real-traffic row. Reg 955 aced margin at **1.0000** on 49 historical rows
+  but hit spearman **0.4411** — rejected. Reg 608 hit **0.9999** margin
+  on 32 rows, spearman **0.2423** — rejected. Reg 590: margin **0.8680**,
+  spearman **0.2284** — rejected. Every step-function / binary-shaped
+  scorer aces margin and fails spearman.
 
-The winning zone needs both. Our v1 build applies v6's recipe (salience
-penalties for sharp verdict separation + 30 % embedding blend for ranking
-nuance) to preserve gradation and threading. On a fraud-focused smoke
-corpus our margin is **+0.6200** vs champion 63's **+0.5878**.
+The champion itself has `historical_rows_evaluated: 0` — spearman never gated
+it, so a first-time candidate can pass the margin gate and be immediately
+promoted without proving spearman. But subsequent traffic will grade it,
+and a scorer that returns only 0 / 1 will lose the slot on the next
+evaluation window.
+
+Our v1 build applies v6's recipe (salience penalties for sharp verdict
+separation + 30 % embedding blend for ranking nuance) to preserve gradation
+and threading. On the OTX-style smoke corpus our margin is **+0.6200** vs
+champion 63's **+0.4644** — very different shape from the champion, which
+is nearly indistinguishable on wrong-address and wrong-entity cases.
+
+Registration URL (raw GitHub, byte-verified round-trip):
+
+```
+https://raw.githubusercontent.com/drained69/DegenLens/3f05b327f38f051983aab4db048114db225e439a/packages/scorer/dist/degenlens_fraud_detection_v1.wasm
+```
+
+`wasmHash` for `registerWasm(wasmHash, wasmUrl, intent)`:
+`0x5fb3bac08f6819dc7c982f0e91b0c4de5207a19b8d5e8a0acf110b93754820cc`.
 
 ### Structural invariants
 

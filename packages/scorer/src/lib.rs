@@ -371,7 +371,7 @@ pub unsafe extern "C" fn dealloc(_ptr: i32, _size: i32) {}
 /// can be traced back to the configuration it was measured with. Space padded to a
 /// fixed width so the build stays byte-for-byte reproducible.
 #[unsafe(no_mangle)]
-pub static TELEGRAPH_INTENT: [u8; 32] = *b"ONCHAIN_TX_LOOKUP               ";
+pub static TELEGRAPH_INTENT: [u8; 32] = *b"FRAUD_DETECTION                 ";
 
 // ---------------------------------------------------------------------------
 // Byte-level primitives
@@ -1527,6 +1527,13 @@ const AUTH_NEG: &[u32] = &[
     h(b"infected"),
     h(b"spam"),
     h(b"fraudulent"),
+    h(b"suspicious"),
+    h(b"anomalous"),
+    h(b"anomaly"),
+    h(b"illicit"),
+    h(b"laundering"),
+    h(b"wash"),
+    h(b"exploit"),
     h(b"deepfake"),
     h(b"bot"),
 ];
@@ -2489,6 +2496,22 @@ mod tests {
         let contra = rank("Did it work?", gt, "The transaction succeeded on chain.");
         assert!(agree > contra, "agree {agree} vs contra {contra}");
         assert!(silent > contra, "silent {silent} vs contra {contra}");
+    }
+
+    #[test]
+    fn fraud_risk_language_tracks_authenticity_polarity() {
+        let gt = "The transfer pattern is legitimate and no suspicious activity was detected.";
+        let clean = rank(
+            "Is this wallet suspicious?",
+            gt,
+            "The activity is legitimate and no suspicious behavior was detected.",
+        );
+        let fraudulent = rank(
+            "Is this wallet suspicious?",
+            gt,
+            "The activity is suspicious and appears illicit.",
+        );
+        assert!(clean > fraudulent, "clean {clean} vs fraudulent {fraudulent}");
     }
 
     /// Structured output is a legitimate answer format and must not be read as

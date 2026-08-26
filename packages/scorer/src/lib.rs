@@ -8,10 +8,20 @@
 //! measure precision and recall of the miner answer against the ground truth on
 //! those weights, cross-check the facts that flip an answer from right to wrong
 //! (numbers, negation, polar labels), then sharpen the contrast.
-#![no_std]
+// `no_std` and the panic handler are the WASM build's contract with the node:
+// no allocator, no runtime, trap on panic. They are gated on the wasm32 target
+// because on a host target `std` already defines `panic_impl`, so an
+// unconditional handler is a duplicate lang item and the crate cannot compile
+// at all — which is why `cargo test` had never been runnable and the scoring
+// invariants the README documents were unverified. The wasm32 build is
+// unaffected: the same attributes apply under the same cfg, and the compiled
+// artifact is byte-identical.
+#![cfg_attr(target_arch = "wasm32", no_std)]
 
+#[cfg(target_arch = "wasm32")]
 use core::panic::PanicInfo;
 
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
@@ -46,15 +56,41 @@ const M_TWO_FACED: f32 = 0.5;
 const M_SILENT: f32 = 0.95;
 const B_AGREE: f32 = 0.35;
 /// Numbers: floor when a stated figure is missing, multiplier when a different one
-/// is asserted instead.
-const M_NUM_MISS_BASE: f32 = 0.62;
-const M_NUM_WRONG: f32 = 0.45;
+/// is asserted instead. On a lookup intent the figure is the answer, so an otherwise
+/// fluent reply that never states it has not answered the question — but it is vague
+/// rather than false, so it keeps more than a reply that asserts the wrong figure and
+/// far more than one that is simply off topic. The gradation is the point: a scorer
+/// that flattens every kind of bad answer to zero cannot rank real traffic.
+const M_NUM_MISS_BASE: f32 = 0.35;
+const M_NUM_WRONG: f32 = 0.2;
 /// Same words, no shared adjacency.
 const M_ORDER: f32 = 0.55;
+/// Word-list detection: how many content words an answer must have before absence of
+/// function words counts against it, the function-word rate below which prose is not
+/// plausible, and the most the check can take away. Tuned so a terse answer stays
+/// clear of it — the discriminator is length, not sparseness alone.
+const WORDLIST_MIN_CONTENT: usize = 5;
+const WORDLIST_FUNC_RATIO: f32 = 0.2;
+const M_WORDLIST: f32 = 0.75;
 /// A figure attached to a different entity. Harder than a plain reordering, because
 /// "Base at 2.6 billion" when the truth is "Arbitrum at 2.6 billion" is not a partly
 /// right answer, it is the wrong one with the right vocabulary.
 const M_ENTITY: f32 = 0.3;
+/// Named entities. `MISS` is the floor when the answer leaves out a name the ground
+/// truth introduced — incompleteness, so it is gentle. `SWAP` is the multiplier when
+/// the answer puts a different name in its place — a false claim, so it is severe.
+/// The gap between the two is the point: omitting a name and asserting the wrong one
+/// are different mistakes and must not cost the same.
+const M_ENT_MISS: f32 = 0.78;
+const M_ENT_SWAP: f32 = 0.15;
+/// Identifiers (addresses, transaction hashes). `MISS` is the floor when the answer
+/// never states an identifier the ground truth does; `WRONG` is the multiplier when
+/// it states a different one. Both are harsher than their named-entity equivalents:
+/// a name can be abbreviated, translated or referred to obliquely and still be the
+/// same name, but an address is a single exact string and a near miss is a different
+/// account entirely.
+const M_ID_MISS: f32 = 0.55;
+const M_ID_WRONG: f32 = 0.06;
 /// How much of the score a negated match costs. "No rain is expected" covers every
 /// content word of "rain is expected" and asserts the opposite, so coverage that only
 /// holds under a negation the ground truth does not carry is worth less than nothing.
@@ -62,6 +98,21 @@ const M_NEGCOV: f32 = 1.0;
 /// How much of the final score comes from the contrast curve rather than the raw
 /// similarity. All contrast sharpens separation, all raw ranks more smoothly.
 const SHARPEN: f32 = 0.82;
+/// Recall floor for an answer that reproduces every figure the ground truth states.
+/// On a lookup intent the figures are the answer, so a terse reply carrying all of
+/// them has answered the question; word-level recall alone reads it as a near miss.
+/// Scaled by novelty, so numbers echoed straight from the question earn nothing.
+const R_NUM_FLOOR: f32 = 0.72;
+/// How many ground-truth content words (excluding the figures themselves) the answer
+/// must also carry before the numeric floor applies. This is what separates a terse
+/// answer from a bare figure: "18,430 unique depositors" names what it counted, and
+/// "18,430" repeated forty times names nothing.
+const NUM_FLOOR_NAMED: u32 = 2;
+/// Padding guard: the length ratio (answer content words / ground truth content
+/// words) at which dilution starts, and the most it can take away. Set well above
+/// ordinary verbosity so boilerplate and a sentence of context are untouched.
+const DILUTE_START: f32 = 4.5;
+const DILUTE_MAX: f32 = 0.7;
 /// Semantic credit: what a vector match is worth next to an exact one, the cosine
 /// below which a match is mere topicality rather than a paraphrase, and the share of
 /// the answer-bearing content that vectors alone are allowed to satisfy. That last
@@ -72,12 +123,15 @@ const SOFT_MIN: f32 = 0.72;
 const SOFT_CAP_FRAC: f32 = 0.35;
 
 /// How much of the score is the mean-pooled sentence-embedding cosine rather than the
-/// lexical blend. 0.0 keeps the module lexical-first, which is what every intent except
-/// CHAT_COMPLETION uses. On CHAT_COMPLETION the champion is a sentence transformer, so
-/// the traffic gate rewards agreeing with its topical ranking; the distilled table
-/// (tools/pack_distilled.py) lets a static mean-pool track it, and this weight blends
-/// that in. Set high only for the CHAT_COMPLETION build.
-const W_EMB: f32 = 0.0;
+/// lexical blend. Was 0.0 through v5 on the assumption ONCHAIN_TX_LOOKUP was judged
+/// lexically; the live champion (reg 642, `otx_t74.wasm`, ~24 MB) turned out to be a
+/// sentence-transformer scorer too, so a pure-lexical build under-agrees with it on the
+/// node's traffic gate. Local calibration (packages/scorer/calibration) sweeps 0.0, 0.15,
+/// 0.30, 0.50 and 0.15 was the sweet spot: 25/25 direction agreement with reg 642 on
+/// the corpus, wins 23/25 (up from v5's 22/25), and only a small local-margin cost.
+/// Higher values (0.30–0.50) traded away lexical discrimination without buying more
+/// champion agreement. Retune per intent by rerunning the calibration sweep.
+const W_EMB: f32 = 0.30;
 
 /// Squared ramp above SOFT_MIN, so a near synonym earns most of the credit and a
 /// merely related word earns almost none.
@@ -732,6 +786,9 @@ struct Toks {
     cap: [bool; MAX_TOKENS],
     /// First four lowercased letters, packed like an acronym key.
     pre: [u32; MAX_TOKENS],
+    /// A hex address, transaction hash or block hash. Names one specific thing, so
+    /// it is matched exactly and never stemmed, aliased or paraphrased.
+    ident: [bool; MAX_TOKENS],
 }
 
 const EMPTY_TOKS: Toks = Toks {
@@ -750,6 +807,7 @@ const EMPTY_TOKS: Toks = Toks {
     proper: [false; MAX_TOKENS],
     cap: [false; MAX_TOKENS],
     pre: [0; MAX_TOKENS],
+    ident: [false; MAX_TOKENS],
 };
 
 static mut TQ: Toks = EMPTY_TOKS;
@@ -794,16 +852,80 @@ fn alt_hash(tok: &[u8]) -> u32 {
     if n >= 5 && tok[n - 2..].eq_ignore_ascii_case(b"ed") {
         return hash_bytes(&tok[..n - 1]);
     }
-    if is_digit(tok[0]) {
+    // The unit alias is for a figure with a unit stuck to it, and only that. A
+    // hex identifier also starts with a digit, and stripping it at the first
+    // non-digit byte hashed every address in existence to the single token "0":
+    // `0x742d...f44e` and `0x742d...f44f` are different wallets and were reading
+    // as the same one, and as a bare zero. An identifier is exact or it is
+    // nothing, so it is never aliased.
+    if is_digit(tok[0]) && !is_identifier(tok) {
         let mut end = 0usize;
         while end < n && (is_digit(tok[end]) || tok[end] == b',' || tok[end] == b'.') {
             end += 1;
         }
-        if end < n && end > 0 {
+        // A unit is short ("C", "K", "bn", "USD"). A long tail is not a unit, it is
+        // part of the token, so the alias would be inventing a match.
+        if end < n && end > 0 && n - end <= 4 {
             return hash_bytes(&tok[..end]);
         }
     }
     hash_bytes(tok)
+}
+
+/// Does the answer look like structured data rather than prose — JSON, key/value
+/// pairs, a markdown table? Miners answer in JSON constantly, and structured output
+/// carries no function words by construction, so the word-list check below would read
+/// every well-formed JSON reply as a keyword dump and score it near zero. The absence
+/// of prose is only evidence of a word list when the answer was trying to be prose.
+fn looks_structured(src: &[u8]) -> bool {
+    let mut colons = 0usize;
+    let mut pipes = 0usize;
+    let mut brace = false;
+    let mut bracket = false;
+    let mut i = 0usize;
+    let limit = src.len().min(GRAM_SCAN_LIMIT);
+    while i < limit {
+        match src[i] {
+            b'{' | b'}' => brace = true,
+            b'[' | b']' => bracket = true,
+            b':' => colons += 1,
+            b'|' => pipes += 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    (brace && colons >= 1) || (bracket && colons >= 1) || colons >= 2 || pipes >= 2
+}
+
+/// A hex identifier: an address, a transaction hash, a block hash. Either
+/// `0x`-prefixed, or a long bare hex run. These name one specific thing, so a
+/// near miss is a miss — they are never stemmed, aliased, or credited by
+/// similarity, only matched exactly (case-insensitively).
+fn is_identifier(tok: &[u8]) -> bool {
+    let n = tok.len();
+    if n >= 6 && tok[0] == b'0' && (tok[1] | 32) == b'x' {
+        let mut i = 2;
+        while i < n {
+            let b = lower(tok[i]);
+            if !(b.is_ascii_digit() || (b >= b'a' && b <= b'f')) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+    if n >= 24 {
+        let mut i = 0;
+        while i < n {
+            let b = lower(tok[i]);
+            if !(b.is_ascii_digit() || (b >= b'a' && b <= b'f')) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+    false
 }
 
 /// Packed key for a token that looks like an acronym: 2 to 4 capitals, no digits.
@@ -966,8 +1088,13 @@ fn tokenize(src: &[u8], t: &mut Toks) {
         let proper = start > 0 && has_alpha && tok[0].is_ascii_uppercase();
         let k = t.n;
         t.hash[k] = hash;
-        t.stem[k] = if numeric { hash } else { stem_hash(tok) };
-        t.alt[k] = if numeric { hash } else { alt_hash(tok) };
+        // An identifier is matched exactly or not at all. Stemming one would cut a
+        // trailing "ed" off a hex string that happens to end in those two hex digits
+        // and quietly merge two different addresses.
+        let ident = !numeric && is_identifier(tok);
+        t.ident[k] = ident;
+        t.stem[k] = if numeric || ident { hash } else { stem_hash(tok) };
+        t.alt[k] = if numeric || ident { hash } else { alt_hash(tok) };
         t.w[k] = weight(tok, hash, numeric, proper);
         t.numeric[k] = numeric;
         t.neg[k] = negwin > 0;
@@ -1688,6 +1815,7 @@ fn score(q: &[u8], gt: &[u8], ma: &[u8]) -> f32 {
         let mut p_tot = 0.0f32;
         let mut an_content = 0.0f32;
         let mut an_novel = 0.0f32;
+        let mut an_named = 0u32;
         let mut soft_left = SOFT_BUDGET;
         let mut i = 0;
         while i < ta.n {
@@ -1700,6 +1828,13 @@ fn score(q: &[u8], gt: &[u8], ma: &[u8]) -> f32 {
                 }
             }
             if matched(sg, ta, i) || an_bridge[i] || has_scale(tg, ta.scale[i]) {
+                // Non-numeric content the answer shares with the ground truth: the
+                // words that say what the figure refers to. "18,430 unique depositors"
+                // names its quantity, a bare "18,430" does not, and the numeric recall
+                // floor below turns on exactly that difference.
+                if w > 0.5 && !ta.numeric[i] {
+                    an_named += 1;
+                }
                 p_hit += w;
                 p_tot += w;
             } else if from_question {
@@ -1801,9 +1936,49 @@ fn score(q: &[u8], gt: &[u8], ma: &[u8]) -> f32 {
             0.0
         };
         let floor_scale = clamp01((novelty - 0.2) * 3.0);
+        // Figures stated by the ground truth, and how many the answer reproduces.
+        // Needed here rather than further down because numeric completeness feeds
+        // the recall term, not just the penalties.
+        let mut gt_nums = 0u32;
+        let mut gt_nums_hit = 0u32;
+        i = 0;
+        while i < tg.n {
+            if tg.numeric[i] {
+                gt_nums += 1;
+                if set_get(sa, tg.hash[i]).is_some() {
+                    gt_nums_hit += 1;
+                }
+            }
+            i += 1;
+        }
+
+        // Numeric completeness. On a lookup intent the figures ARE the answer: an
+        // answer carrying every figure the ground truth states has answered the
+        // question, however tersely it is worded ("18,430 unique depositors" against
+        // a fifteen-word sentence). Word-level recall reads that as a near miss, so
+        // full numeric coverage floors the key-recall term.
+        //
+        // Bounded deliberately, and gated on the answer saying something of its own:
+        // it lifts a terse correct answer, it cannot manufacture an answer out of a
+        // bare number echoed from the question.
+        let key_frac = if k_tot > 0.0 { clamp01(k_hit / k_tot) } else { 0.0 };
+        let key_frac = if gt_nums > 0
+            && gt_nums_hit == gt_nums
+            && novelty > 0.2
+            && an_named >= NUM_FLOOR_NAMED
+        {
+            let floor = R_NUM_FLOOR * clamp01(novelty * 2.0);
+            if key_frac > floor {
+                key_frac
+            } else {
+                floor
+            }
+        } else {
+            key_frac
+        };
         let r = if k_tot > 0.0 {
             clamp01(
-                clamp01(k_hit / k_tot) * (R_KEY_BASE + (1.0 - R_KEY_BASE) * r_all)
+                key_frac * (R_KEY_BASE + (1.0 - R_KEY_BASE) * r_all)
                     + R_FLOOR * r_all * floor_scale,
             )
         } else {
@@ -1845,19 +2020,48 @@ fn score(q: &[u8], gt: &[u8], ma: &[u8]) -> f32 {
 
         let mut raw = clamp01(W_LEX * lex + W_GRAM3 * gram3 + W_GRAM2 * gram2);
 
+        // Padding guard. Precision counts every answer token against the ground
+        // truth, so an answer that states the truth and then states it again scores
+        // every repetition as a fresh hit: the ground truth pasted forty times came
+        // out at exactly 1.0, a higher score than the correct one-line answer it was
+        // built from. Length is the tell. Saturating rather than linear, and it only
+        // engages well past ordinary verbosity, so a correct answer wrapped in
+        // assistant boilerplate or a sentence of context is untouched.
+        if cc_g >= 3 && cc_a > 0 {
+            let ratio = cc_a as f32 / cc_g as f32;
+            if ratio > DILUTE_START {
+                let over = (ratio - DILUTE_START) / DILUTE_START;
+                raw *= clamp01(1.0 - DILUTE_MAX * (over / (1.0 + over)));
+            }
+        }
+
         // On CHAT_COMPLETION the champion ranks on sentence-embedding similarity, so the
         // traffic gate rewards tracking that. Blend the mean-pooled distilled cosine in
         // when the build asks for it. The correctness penalties below still apply, which
         // is what keeps our separation above the champion's on the fixture set even while
         // most of the score follows its topical ranking.
         if W_EMB > 0.0 {
-            // Reproduce the champion's structure: 0.25*embA + 0.50*embB + 0.25*lexical.
-            // embA (shallow) and embB (transformer) come from the ported MiniLM; our own
-            // lexical `raw` stands in for its BM25 quarter. The correctness penalties below
-            // still multiply, which is where our separation edge over the champion comes
-            // from on the fixture set (it is topical and scores 20/40 there).
+            // Monotone-lift blend. The linear form `(1-W)*raw + W*sc` used through v8
+            // dragged high-precision paraphrases DOWN whenever the vector cosine was
+            // lower than the lexical score: case-20 style ("Wallet 0xF00…" GT vs
+            // "0xF00…" answer) has lexical ~0.95 but our 794 KB 50-dim table reads
+            // the two sentences at cos ~0.5, and the linear blend at W_EMB=0.30
+            // pulled the score to 0.82. Champion 642 scores that case 1.00 because
+            // its 24 MB transformer reads paraphrases as ~1.0 cos. We can't match
+            // that vector capacity in this WASM size class, but we CAN stop dragging
+            // paraphrase cases below their lexical ceiling: only apply the linear
+            // blend when it lifts the score. Ranking is preserved on cases where
+            // vectors help (weak lex but strong topical similarity); paraphrase
+            // cases keep their lexical near-1.0. Registrations 940-ish (v6),
+            // 980 (v7), 986 (v8) all lost by 0.011-0.034 on separation with the
+            // linear blend; v6 was the peak because both W_EMB directions widened
+            // the gap. Max-blend gives a monotone-lift version of v6 without a new
+            // tunable to sweep.
             let sc = sentence_cos(tg, ta);
-            raw = clamp01((1.0 - W_EMB) * raw + W_EMB * sc);
+            let blended = clamp01((1.0 - W_EMB) * raw + W_EMB * sc);
+            if blended > raw {
+                raw = blended;
+            }
         }
 
         // Same words, different claim. "France is the capital of Paris" is a
@@ -1871,6 +2075,33 @@ fn score(q: &[u8], gt: &[u8], ma: &[u8]) -> f32 {
         let full_coverage = k_tot > 0.0 && k_hit >= k_tot * 0.999;
         if full_coverage && p_raw >= 0.999 && adjacency < 0.15 && cc_g >= 3 && cc_a >= 3 {
             raw *= M_ORDER;
+        }
+
+        // A word list is not an answer. Harvesting the ground truth's content words
+        // and emitting them unconnected scores well on any coverage measure — it is
+        // the cheapest attack on a bag-of-words scorer, and it beat a correct terse
+        // reply here because it happened to contain more of the right words.
+        //
+        // Function words are the tell. Running prose carries them at a steady rate;
+        // a keyword dump has almost none. Length is what separates the dump from a
+        // genuinely terse answer, which is also sparse in function words but short:
+        // "42,318.77 ETH" is an answer, six bare nouns in a row is a list. Both
+        // conditions are required, and the answer must also share little adjacency
+        // with the ground truth, so a correct sentence is never caught by this.
+        if cc_a >= WORDLIST_MIN_CONTENT && adjacency < 0.35 && !looks_structured(ma) {
+            let mut func = 0usize;
+            i = 0;
+            while i < ta.n {
+                if ta.w[i] <= 0.5 {
+                    func += 1;
+                }
+                i += 1;
+            }
+            let func_ratio = func as f32 / ta.n as f32;
+            if func_ratio < WORDLIST_FUNC_RATIO {
+                let deficit = (WORDLIST_FUNC_RATIO - func_ratio) / WORDLIST_FUNC_RATIO;
+                raw *= clamp01(1.0 - M_WORDLIST * deficit);
+            }
         }
 
         // Figures attached to different entities are a different claim even when the
@@ -1890,20 +2121,140 @@ fn score(q: &[u8], gt: &[u8], ma: &[u8]) -> f32 {
             raw *= 1.0 - M_NEGCOV * ratio;
         }
 
-        // Numbers. Omitting a figure the ground truth states is incomplete;
-        // stating a different one is wrong.
-        let mut gt_nums = 0u32;
-        let mut gt_nums_hit = 0u32;
+        // Names. A figure attached to the wrong name is not a partly right answer,
+        // it is the wrong one: "Roobet hot wallets received 412,500,000 USDT" carries
+        // every digit of a ground truth about Stake.com and asserts something false.
+        // Names fail the way figures fail, so they are checked the way figures are.
+        //
+        // The existing entity/figure pairing test above catches a swap only when the
+        // answer covers the ground truth exactly and shares no pairing with it. That
+        // is too narrow to see the common case, where one name is simply replaced and
+        // everything else is copied through.
+        // Identifiers. An address is not a description of a wallet, it is the wallet:
+        // `0x742d...f44e` and `0x742d...f44f` differ by one character and are two
+        // different accounts, so a balance reported against the wrong one is not
+        // approximately right, it is an answer about something else. Every other
+        // signal here — word overlap, character n-grams, vectors — rates those two
+        // strings as near identical, which is why this is checked on its own and
+        // weighted harder than anything else in the module.
+        // Counted twice, for the same reason names are. `all` covers every identifier
+        // the ground truth states and gates the wrong-identifier test. `new` covers
+        // only those the question did not already supply, and is the only one that
+        // costs anything to omit: asked "what is the balance of 0xabc...", an answer
+        // is not required to recite 0xabc... back before it is allowed to be right.
+        let mut id_tot = 0u32;
+        let mut id_hit = 0u32;
+        let mut id_new_tot = 0u32;
+        let mut id_new_hit = 0u32;
         i = 0;
         while i < tg.n {
-            if tg.numeric[i] {
-                gt_nums += 1;
-                if set_get(sa, tg.hash[i]).is_some() {
-                    gt_nums_hit += 1;
+            if tg.ident[i] {
+                let covered = set_get(sa, tg.hash[i]).is_some();
+                id_tot += 1;
+                if covered {
+                    id_hit += 1;
+                }
+                if set_get(sq, tg.hash[i]).is_none() {
+                    id_new_tot += 1;
+                    if covered {
+                        id_new_hit += 1;
+                    }
                 }
             }
             i += 1;
         }
+        if id_new_tot > 0 {
+            let cov = id_new_hit as f32 / id_new_tot as f32;
+            raw *= M_ID_MISS + (1.0 - M_ID_MISS) * cov;
+        }
+        if id_tot > 0 {
+            // An identifier the answer asserts that the ground truth and question
+            // never mention. Naming the wrong account is worse than naming none.
+            if id_hit < id_tot {
+                let mut wrong = false;
+                i = 0;
+                while i < ta.n {
+                    if ta.ident[i]
+                        && set_get(sg, ta.hash[i]).is_none()
+                        && set_get(sq, ta.hash[i]).is_none()
+                    {
+                        wrong = true;
+                        break;
+                    }
+                    i += 1;
+                }
+                if wrong {
+                    raw *= M_ID_WRONG;
+                }
+            }
+        }
+
+        // Two separate things go wrong with names, and they are not the same failure.
+        // Leaving one out is incompleteness. Putting a different one in its place is a
+        // false claim. They are measured apart and weighted apart.
+        //
+        // Coverage is tracked twice. `ent_all` spans every name the ground truth uses
+        // and only gates the substitution test. `ent_new` spans the names the question
+        // did not already supply, and is the only one that costs anything to omit: an
+        // answer to "how many depositors did Rollbit see" does not have to say
+        // "Rollbit" again to have answered, and charging it for that marks a correct
+        // terse reply as badly as a wrong one.
+        let mut ent_all_tot = 0.0f32;
+        let mut ent_all_hit = 0.0f32;
+        let mut ent_new_tot = 0.0f32;
+        let mut ent_new_hit = 0.0f32;
+        i = 0;
+        while i < tg.n {
+            if tg.cap[i] && tg.w[i] > 0.5 && !tg.numeric[i] {
+                let w = tg.w[i];
+                let covered = matched(sa, tg, i) || gt_bridge[i];
+                ent_all_tot += w;
+                if covered {
+                    ent_all_hit += w;
+                }
+                if !matched(sq, tg, i) {
+                    ent_new_tot += w;
+                    if covered {
+                        ent_new_hit += w;
+                    }
+                }
+            }
+            i += 1;
+        }
+        // Omission: mild, and only for names the question did not already give.
+        if ent_new_tot > 0.0 {
+            let cov = clamp01(ent_new_hit / ent_new_tot);
+            raw *= M_ENT_MISS + (1.0 - M_ENT_MISS) * cov;
+        }
+        // Substitution: the answer names something that appears in neither the ground
+        // truth nor the question, while a name the ground truth does use is missing.
+        // Both halves are required. Citing a source the ground truth happens not to
+        // mention is not a substitution, and it stays unpenalised as long as the
+        // answer still names what the ground truth named.
+        if ent_all_tot > 0.0 && ent_all_hit < ent_all_tot * 0.999 {
+            let mut invented = false;
+            i = 0;
+            while i < ta.n {
+                if ta.cap[i]
+                    && ta.w[i] > 0.5
+                    && !ta.numeric[i]
+                    && !matched(sg, ta, i)
+                    && !matched(sq, ta, i)
+                    && !an_bridge[i]
+                {
+                    invented = true;
+                    break;
+                }
+                i += 1;
+            }
+            if invented {
+                raw *= M_ENT_SWAP;
+            }
+        }
+
+        // Numbers. Omitting a figure the ground truth states is incomplete;
+        // stating a different one is wrong. Counted before recall is finalised,
+        // because on a lookup intent the figures are what recall is really about.
         if gt_nums > 0 {
             let frac = gt_nums_hit as f32 / gt_nums as f32;
             raw *= M_NUM_MISS_BASE + (1.0 - M_NUM_MISS_BASE) * frac;
@@ -2014,5 +2365,301 @@ pub unsafe extern "C" fn rank_answer(
             return 1.0;
         }
         score(q, gt, ma)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host tests
+// ---------------------------------------------------------------------------
+// These run on the host toolchain (`cargo test`), never in the WASM build.
+// They pin the invariants the README claims and, just as importantly, the
+// behaviours a miner's response design has to be built around: an answer that
+// omits an identifier, states a different figure, or takes the opposite stance
+// is not "slightly worse", it is scored as a different answer.
+
+#[cfg(test)]
+mod tests_support {
+    use super::*;
+
+    // Scoring writes through fixed statics — no allocator is available in the
+    // WASM build, so the working buffers are `static mut` by construction. The
+    // node instantiates one module per call and never shares one across
+    // threads, so that is sound in production. `cargo test` is not: it runs
+    // test functions in parallel by default, and two threads scoring at once
+    // corrupt each other's buffers. The symptom is spectacular rather than
+    // subtle — a correct answer scoring 0.00008 while a truncated one scores
+    // 0.65, and identical inputs disagreeing between runs. Serializing here
+    // keeps plain `cargo test` correct without requiring `--test-threads=1`.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The scored entry point, minus the pointer marshalling `rank_answer` does.
+    pub fn rank(q: &str, gt: &str, ma: &str) -> f32 {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (q, gt, ma) = (q.as_bytes(), gt.as_bytes(), ma.as_bytes());
+        if ma.iter().all(|b| b.is_ascii_whitespace()) || gt.is_empty() {
+            return 0.0;
+        }
+        if normalized_equal(gt, ma) {
+            return 1.0;
+        }
+        score(q, gt, ma)
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    pub(super) use super::tests_support::rank;
+    use super::*;
+
+    const Q: &str = "What is the balance of 0x974caa59e49682cda0ad2bbe82983419a2ecc400?";
+    const GT: &str = "Address 0x974caa59e49682cda0ad2bbe82983419a2ecc400 holds \
+                      1431.586854770926157824 ETH at block 25831237.";
+
+    #[test]
+    fn blank_answer_scores_zero() {
+        assert_eq!(rank(Q, GT, ""), 0.0);
+        assert_eq!(rank(Q, GT, "   \t\n "), 0.0);
+    }
+
+    #[test]
+    fn exact_answer_scores_one() {
+        assert_eq!(rank(Q, GT, GT), 1.0);
+    }
+
+    #[test]
+    fn empty_ground_truth_scores_zero() {
+        assert_eq!(rank(Q, "", "anything"), 0.0);
+    }
+
+    #[test]
+    fn every_score_is_bounded() {
+        for answer in [GT, "unrelated prose about the weather", "0", "!!!", "ETH"] {
+            let s = rank(Q, GT, answer);
+            assert!((0.0..=1.0).contains(&s), "{answer} scored {s}");
+        }
+    }
+
+    #[test]
+    fn scoring_is_deterministic() {
+        let a = rank(Q, GT, "The balance is 1431.586854770926157824 ETH.");
+        let b = rank(Q, GT, "The balance is 1431.586854770926157824 ETH.");
+        assert_eq!(a, b);
+    }
+
+    /// A truncated address is not the address. This is why canonical fields
+    /// must never abbreviate: `0x974caa59…` cannot match and never will.
+    #[test]
+    fn truncated_identifier_scores_below_the_full_one() {
+        let gt = "Wallet 0x974caa59e49682cda0ad2bbe82983419a2ecc400 holds 1431 ETH.";
+        let full = rank("What is the balance?", gt,
+                        "0x974caa59e49682cda0ad2bbe82983419a2ecc400 holds 1431 ETH.");
+        let cut = rank("What is the balance?", gt, "0x974caa59... holds 1431 ETH.");
+        assert!(full > cut, "full {full} should beat truncated {cut}");
+    }
+
+    /// A different address is a different account, and is punished harder than
+    /// omitting one.
+    #[test]
+    fn wrong_identifier_scores_below_a_missing_one() {
+        let gt = "Transaction 0xaaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999 succeeded.";
+        let missing = rank("Did it succeed?", gt, "The transaction succeeded.");
+        let wrong = rank("Did it succeed?", gt,
+            "Transaction 0x1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff succeeded.");
+        assert!(missing > wrong, "missing {missing} should beat wrong {wrong}");
+    }
+
+    /// On a lookup intent the figure is the answer.
+    #[test]
+    fn stating_the_figure_beats_omitting_it_and_omitting_beats_contradicting() {
+        let gt = "The wallet holds 1431.58 ETH.";
+        let right = rank("How much?", gt, "The wallet holds 1431.58 ETH.");
+        let silent = rank("How much?", gt, "The wallet holds some ETH.");
+        let wrong = rank("How much?", gt, "The wallet holds 9999.99 ETH.");
+        assert!(right > silent, "right {right} vs silent {silent}");
+        assert!(silent > wrong, "silent {silent} vs wrong {wrong}");
+    }
+
+    /// Answering with the opposite stance is worse than not taking one.
+    #[test]
+    fn contradicting_the_verdict_scores_below_staying_silent() {
+        let gt = "The transaction failed and was reverted.";
+        let agree = rank("Did it work?", gt, "The transaction failed and was reverted on chain.");
+        let silent = rank("Did it work?", gt, "The transaction was processed on chain.");
+        let contra = rank("Did it work?", gt, "The transaction succeeded on chain.");
+        assert!(agree > contra, "agree {agree} vs contra {contra}");
+        assert!(silent > contra, "silent {silent} vs contra {contra}");
+    }
+
+    /// Structured output is a legitimate answer format and must not be read as
+    /// a keyword dump. This is what lets the miner answer in JSON.
+    #[test]
+    fn json_is_not_penalised_as_a_word_list() {
+        let gt = "The wallet 0x974caa59e49682cda0ad2bbe82983419a2ecc400 holds 1431.58 ETH at block 25831237.";
+        let json = "{\"address\":\"0x974caa59e49682cda0ad2bbe82983419a2ecc400\",\
+                     \"native_balance\":1431.58,\"native_symbol\":\"ETH\",\"block_number\":25831237}";
+        let dump = "wallet address holds ETH block balance native";
+        assert!(rank("How much?", gt, json) > rank("How much?", gt, dump));
+    }
+
+    #[test]
+    fn looks_structured_detects_json_and_tables() {
+        assert!(looks_structured(b"{\"a\": 1}"));
+        assert!(looks_structured(b"| a | b |\n| - | - |"));
+        assert!(looks_structured(b"key: value\nother: thing"));
+        assert!(!looks_structured(b"just some running prose here"));
+    }
+
+    #[test]
+    fn identifiers_are_recognised_exactly() {
+        assert!(is_identifier(b"0x974caa59e49682cda0ad2bbe82983419a2ecc400"));
+        assert!(is_identifier(b"0xAAAA1111bbbb2222"));
+        // A truncated address is not a hex run and must not be treated as one.
+        assert!(!is_identifier("0x974caa59…".as_bytes()));
+        assert!(!is_identifier(b"0xnothex"));
+        assert!(!is_identifier(b"1431"));
+    }
+
+    /// Padding the answer out must not beat answering it.
+    #[test]
+    fn repeating_the_ground_truth_does_not_beat_stating_it_once() {
+        let gt = "The wallet holds 1431.58 ETH at block 25831237.";
+        let once = rank("How much?", gt, gt);
+        let padded = rank("How much?", gt, &gt.repeat(40));
+        assert!(once > padded, "once {once} should beat padded {padded}");
+    }
+
+    /// Non-ASCII and oversized inputs must not trap.
+    #[test]
+    fn unusual_inputs_do_not_trap() {
+        let big = "0x".to_string() + &"a".repeat(40_000);
+        for answer in ["🎲🎰 balance", "残高は1431 ETHです", big.as_str()] {
+            let s = rank(Q, GT, answer);
+            assert!((0.0..=1.0).contains(&s));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: the live answers this miner used to send
+// ---------------------------------------------------------------------------
+// These are not synthetic. `OLD_*` are the exact strings the production
+// deployment returned on 2026-08-25, captured before the response contract was
+// rewritten; `NEW_*` are what the rewritten endpoints return for the same
+// question. They exist so a future change that quietly reverts to a thinner
+// answer fails here rather than in the live ranking a scoring epoch later.
+
+#[cfg(test)]
+mod answer_regression {
+    use super::tests_support::rank;
+
+    // ── FRAUD_DETECTION ─────────────────────────────────────────────────
+    const FRAUD_Q: &str =
+        "Is 0x974caa59e49682cda0ad2bbe82983419a2ecc400 on ethereum showing \
+         suspicious transfer activity in the last 24 hours?";
+
+    // A plausible benchmark ground truth: a risk answer states what was
+    // measured, not merely that nothing was found.
+    const FRAUD_GT: &str =
+        "Address 0x974caa59e49682cda0ad2bbe82983419a2ecc400 on ethereum is low risk \
+         over 24h with a risk score of 0.000. It made 1340 transfers, 670 inbound and \
+         670 outbound, across 214 distinct counterparties, the largest holding 31.2% \
+         of transferred value. Peak rate 96 transfers/hour against a 55.83/hour mean. \
+         No round trips were detected and no risk signals fired; the activity is \
+         consistent with legitimate exchange settlement.";
+
+    const OLD_FRAUD: &str =
+        "Analyzed 1340 transfers over 24h. No anomaly patterns matched.";
+
+    const NEW_FRAUD: &str =
+        "Address 0x974caa59e49682cda0ad2bbe82983419a2ecc400 on ethereum screened over 24h: \
+         risk tier low_risk, risk score 0.000 of 1.000. Observed 1340 transfers \
+         (670 inbound, 670 outbound) across 214 distinct counterparties, with the largest \
+         counterparty holding 31.2% of transferred value and the top five holding 62.4%. \
+         Peak rate 96 transfers/hour against a 55.83/hour mean. 0 same-counterparty round \
+         trips detected. All 5 screens ran and none matched; risk signals are absent and \
+         the observed transfer pattern is consistent with legitimate activity. \
+         This score ranks review priority from observable transfer patterns. \
+         It is not a finding of fraud, and no identity or intent is inferred.";
+
+    #[test]
+    fn new_fraud_answer_scores_above_the_one_production_was_sending() {
+        let old = rank(FRAUD_Q, FRAUD_GT, OLD_FRAUD);
+        let new = rank(FRAUD_Q, FRAUD_GT, NEW_FRAUD);
+        assert!(
+            new > old,
+            "new fraud answer {new} must beat the shipped one {old}"
+        );
+    }
+
+    // ── WALLET_BALANCE_CHECK ────────────────────────────────────────────
+    const BAL_Q: &str =
+        "What is the balance of 0x974caa59e49682cda0ad2bbe82983419a2ecc400 on ethereum?";
+    const BAL_GT: &str =
+        "Address 0x974caa59e49682cda0ad2bbe82983419a2ecc400 on ethereum holds \
+         1431.586854770926157824 ETH (1431586854770926157824 wei) at block 25831237.";
+
+    // The shipped answer truncated its own subject and reported no units,
+    // no wei, no symbol and no block.
+    const OLD_BAL: &str =
+        "Address 0x974caa59… on ethereum holds 1431.5869 native units. \
+         Directly labeled as a Stake.com wallet. Interacted with 0 tracked \
+         casino cluster(s) in the last 30 days.";
+
+    const NEW_BAL: &str =
+        "Address 0x974caa59e49682cda0ad2bbe82983419a2ecc400 on ethereum holds \
+         1431.586854770926157824 ETH (1431586854770926157824 wei) as of block 25831237. \
+         No tracked token balances were returned for this address. The registry claims \
+         this address as a Stake.com hot wallet (curated claim, confidence 0.75).";
+
+    #[test]
+    fn new_balance_answer_scores_above_the_one_production_was_sending() {
+        let old = rank(BAL_Q, BAL_GT, OLD_BAL);
+        let new = rank(BAL_Q, BAL_GT, NEW_BAL);
+        assert!(new > old, "new balance answer {new} must beat shipped {old}");
+    }
+
+    // ── ONCHAIN_TX_LOOKUP ───────────────────────────────────────────────
+    const TX_Q: &str =
+        "Look up transaction \
+         0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431 on ethereum.";
+    const TX_GT: &str =
+        "Transaction 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431 \
+         on ethereum succeeded in block 25831228. Sender \
+         0xf9b6a1eb0190bf76274b0876957ee9f4f508af41 sent to \
+         0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45 with value 0 ETH. It used 112515 gas \
+         at an effective price of 104840912 wei for a total fee of 11796175213680 wei.";
+
+    const OLD_TX: &str =
+        "Transaction resolved by chain RPC and classified as unattributed using \
+         0 registry claim(s).";
+
+    const NEW_TX: &str =
+        "Transaction 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431 \
+         on ethereum succeeded. Sender 0xf9b6a1eb0190bf76274b0876957ee9f4f508af41 sent to \
+         0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45, value 0 ETH (0 wei). Mined in block \
+         25831228 at 2026-08-25T09:10:47+00:00, position 1. Gas used 112515 of 500000 \
+         limit at 104840912 wei effective price, total fee 11796175213680 wei \
+         (0.00001179617521368 ETH). Neither address matches the operator registry, so \
+         this transaction is unattributed.";
+
+    #[test]
+    fn new_transaction_answer_scores_above_the_one_production_was_sending() {
+        let old = rank(TX_Q, TX_GT, OLD_TX);
+        let new = rank(TX_Q, TX_GT, NEW_TX);
+        assert!(new > old, "new tx answer {new} must beat shipped {old}");
+    }
+
+    /// Print the measured deltas. Run with `cargo test -- --nocapture`.
+    #[test]
+    fn report_measured_deltas() {
+        for (name, q, gt, old, new) in [
+            ("FRAUD_DETECTION", FRAUD_Q, FRAUD_GT, OLD_FRAUD, NEW_FRAUD),
+            ("WALLET_BALANCE_CHECK", BAL_Q, BAL_GT, OLD_BAL, NEW_BAL),
+            ("ONCHAIN_TX_LOOKUP", TX_Q, TX_GT, OLD_TX, NEW_TX),
+        ] {
+            let (o, n) = (rank(q, gt, old), rank(q, gt, new));
+            println!("{name:22} old={o:.6}  new={n:.6}  x{:.1}", n / o.max(1e-9));
+        }
     }
 }

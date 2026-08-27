@@ -663,7 +663,14 @@ async def casino_stats_endpoint(req: CasinoStatsRequest) -> dict[str, Any]:
         return _stamp({
             "verdict": "unknown_casino",
             "confidence": 0.0,
-            "reasoning": f"'{req.slug}' is not a tracked casino. Known slugs: {known}.",
+            "reasoning": (
+                f"Operator flow lookup for slug '{req.slug}' over the last {req.hours}h could "
+                f"not be served because '{req.slug}' is not among the tracked casino operators in the "
+                f"attribution registry. No transaction, transfer, deposit, withdrawal, counterparty, "
+                f"or net-flow figure can be reported. Known operator slugs are: {known}. This is an "
+                f"absence of a registered attribution claim, not an assertion about the operator's "
+                f"on-chain activity."
+            ),
             "data_source": "unavailable",
             "known_slugs": [c.slug for c in all_casinos()],
         })
@@ -1457,7 +1464,15 @@ async def operator_counterparties_endpoint(
             **result,
             "confidence": 0.0,
             "verdict": "not_attributed",
-            "reasoning": f"'{slug}' has no reviewed wallet claim — flow is unobserved.",
+            "reasoning": (
+                f"Counterparty concentration for operator '{slug}' over the last {hours}h "
+                f"could not be computed: '{slug}' has no reviewed wallet claim in the "
+                f"attribution registry, so no address of this operator's is being watched "
+                f"and no inbound or outbound transfer can be observed. Distinct "
+                f"counterparties, top-10 share, and routing versus broad-user-behaviour "
+                f"analysis are unavailable. This is an absence of a registered wallet claim, "
+                f"not an assertion that the operator has no observable on-chain activity."
+            ),
             "data_source": "unavailable",
         })
     return _stamp({

@@ -512,8 +512,12 @@ def _first_alias(data: Any, canonical: str, aliases: tuple[str, ...]) -> Any:
 
 
 class WalletTraceRequest(BaseModel):
-    address: str = Field(
-        ...,
+    # Optional so that a well-formed question naming a subject we cannot read
+    # is answerable as OUT OF COVERAGE rather than rejected as malformed. Those
+    # are different facts: one is our limit, the other is the caller's mistake,
+    # and collapsing them tells the caller the wrong thing to fix.
+    address: str | None = Field(
+        None,
         description=(
             "Wallet address: 0x-prefixed 40 hex characters, an ENS name ending "
             ".eth, or a native address for solana/tron/bitcoin"
@@ -545,8 +549,12 @@ class WalletTraceRequest(BaseModel):
 
 
 class AnomalyRequest(BaseModel):
-    address: str = Field(
-        ...,
+    # Optional for the same reason as WalletTraceRequest.address: the canonical
+    # FRAUD_DETECTION intent spans "a specific entity, transaction or action",
+    # which is wider than the on-chain addresses this miner can observe. A
+    # question about a named company is well-formed and simply outside coverage.
+    address: str | None = Field(
+        None,
         description=(
             "Address to screen: 0x-prefixed 40 hex characters, an ENS name, or a "
             "native solana/tron/bitcoin address"
@@ -587,7 +595,7 @@ class TransactionLookupRequest(BaseModel):
     # a checksummed or padded hash is answered rather than refused. The 64-hex
     # shape itself is still enforced: a malformed hash is a real client error and
     # is reported as invalid_input, not looked up.
-    tx_hash: str = Field(..., pattern=r"^0x[a-f0-9]{64}$")
+    tx_hash: str | None = Field(None, pattern=r"^0x[a-f0-9]{64}$")
     chain: str = Field("ethereum", pattern=_CHAIN_PATTERN)
     query: str | None = Field(
         None,
@@ -960,6 +968,19 @@ def _transaction_reasoning(
 @app.post("/transaction/lookup", tags=["ONCHAIN_TX_LOOKUP"])
 async def transaction_lookup_endpoint(req: TransactionLookupRequest) -> dict[str, Any]:
     """Canonical transaction lookup enriched with gambling entity attribution."""
+    if not req.tx_hash:
+        return _out_of_coverage(
+            subject=(req.query or "").strip() or None,
+            intent="ONCHAIN_TX_LOOKUP",
+            missing_field="tx_hash",
+            wanted="a transaction hash: 0x followed by exactly 64 hex characters",
+            can_see=(
+                "This miner looks up one specific transaction by hash and returns "
+                "its status, block, parties, value, gas and decoded token "
+                "transfers. It cannot search for a transaction by description."
+            ),
+            extra={"chain": req.chain, "method": "direct_rpc_lookup", "evidence": []},
+        )
     transaction, unavailable_reason = await transaction_lookup(req.tx_hash, req.chain)
     if transaction is None:
         # Fact-echoing prose even on the unavailable path. The scored reasoning
@@ -1126,6 +1147,58 @@ def _units(raw: int | None, decimals: int = 18) -> str | None:
     return f"{sign}{whole}.{str(frac).rjust(decimals, '0').rstrip('0')}"
 
 
+def _out_of_coverage(
+    *, subject: str | None, intent: str, wanted: str, can_see: str,
+    missing_field: str, extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A well-formed question this miner cannot answer, answered honestly.
+
+    Three outcomes have to stay distinguishable and the previous shape collapsed
+    two of them. `invalid_input` means the caller sent something malformed and
+    should fix the request. This means the request was fine and the SUBJECT is
+    outside what the miner observes — nothing the caller can fix, and nothing
+    that should be guessed at.
+
+    The canonical FRAUD_DETECTION intent covers "a specific entity, transaction
+    or action". That is wider than the on-chain addresses this miner reads, so
+    "was <some company> a scam" is a legitimate question for the intent and an
+    honest miss for us. Saying so plainly beats both a request-format error and
+    a fabricated verdict.
+    """
+    # No subject at all is a malformed request, not a coverage limit: there is
+    # nothing to be outside coverage OF, and telling the caller "we cannot see
+    # that" when they sent an empty body points them at the wrong fix.
+    if not subject:
+        return _stamp({
+            "verdict": "invalid_input",
+            "confidence": 0.0,
+            "reasoning": (
+                f"No subject was supplied. Answering under {intent} needs {wanted}."
+            ),
+            "data_source": "unavailable",
+            "error": "invalid_input",
+            # Same shape the request-validation handler returns, so a caller
+            # parses one contract for every malformed request rather than two.
+            "invalid_fields": [f"{missing_field}: Field required"],
+            **(extra or {}),
+        })
+    return _stamp({
+        "verdict": "out_of_coverage",
+        "confidence": 0.0,
+        "reasoning": (
+            f'The question "{subject}" is well formed, but answering it under '
+            f"{intent} needs {wanted}, and none was given or could be read from "
+            f"it. {can_see} No assessment is offered rather than a guess: this "
+            "miner observes settlement on the chains it indexes and cannot see "
+            "off-chain entities, identities, or intent."
+        ),
+        "data_source": "unavailable",
+        "coverage_complete": False,
+        "subject": subject,
+        **(extra or {}),
+    })
+
+
 async def _resolve_subject(raw: str, chain: str) -> tuple[str, str | None, str | None]:
     """Turn whatever the caller named into an address we can read.
 
@@ -1228,6 +1301,23 @@ async def wallet_trace_endpoint(req: WalletTraceRequest) -> dict[str, Any]:
     available; `/wallet/trace` is the path the manifest declares and keeps
     working unchanged.
     """
+    if not req.address:
+        return _out_of_coverage(
+            subject=(req.query or "").strip() or None,
+            intent="WALLET_BALANCE_CHECK",
+            missing_field="address",
+            wanted="a specific blockchain address or ENS name",
+            can_see=(
+                "This miner returns the native and token balances of an address on "
+                "ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, "
+                "solana, tron and bitcoin, and resolves .eth names through the ENS "
+                "registry. It cannot identify which address a person or company "
+                "controls."
+            ),
+            extra={"chain": req.chain, "balance_status": "unavailable",
+                   "native_balance_wei": None, "native_balance": None,
+                   "balance_native": None},
+        )
     address, ens_name, ens_failure = await _resolve_subject(req.address, req.chain)
     if ens_failure:
         return _stamp({
@@ -1383,6 +1473,23 @@ async def anomaly_check_endpoint(req: AnomalyRequest) -> dict[str, Any]:
     label is `risk_tier`; `verdict` carries the same finding in the older
     vocabulary so existing consumers keep working.
     """
+    if not req.address:
+        return _out_of_coverage(
+            subject=(req.query or "").strip() or None,
+            intent="FRAUD_DETECTION",
+            missing_field="address",
+            wanted="a specific on-chain address or ENS name to screen",
+            can_see=(
+                "This miner assesses how likely an ADDRESS is to be fraudulent from "
+                "its observable transfer behaviour on ethereum, base, polygon, "
+                "arbitrum, optimism, bsc, avalanche, solana, tron and bitcoin. It "
+                "holds no database of named companies, brands, schemes or "
+                "enforcement outcomes, so it cannot rate one."
+            ),
+            extra={"chain": req.chain, "window_hours": req.hours,
+                   "risk_tier": "insufficient_data", "risk_score": 0.0,
+                   "is_suspicious": False},
+        )
     address, ens_name, ens_failure = await _resolve_subject(req.address, req.chain)
     if ens_failure:
         return _stamp({

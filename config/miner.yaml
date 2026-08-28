@@ -383,8 +383,10 @@ endpoints:
       characterise returns insufficient_data, never low_risk. Coverage is
       on-chain addresses on the listed chains; a question about a named
       company, brand, scheme or other off-chain entity is outside what this
-      miner can observe and is answered as such with confidence 0 rather than
-      guessed. Nothing here asserts that fraud occurred — the tiers rank review
+      miner can observe and is answered with verdict "out_of_coverage" and
+      confidence 0, naming what would make the question answerable, rather than
+      guessed. A malformed request is instead "invalid_input" — this miner's
+      limit and the caller's mistake are never conflated. Nothing here asserts that fraud occurred — the tiers rank review
       priority from observable transfer patterns and infer no identity or
       intent. Params: address (required, 0x-prefixed followed by exactly 40 hex
       characters for example 0x974caa59e49682cda0ad2bbe82983419a2ecc400, or an

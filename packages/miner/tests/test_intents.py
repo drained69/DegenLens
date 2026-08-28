@@ -952,3 +952,86 @@ def test_keccak256_matches_published_vectors():
         "93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae"
     )
     assert _namehash("").hex() == "00" * 32
+
+
+# ── Coverage vs malformed input ──────────────────────────────────────────────
+# Three outcomes that must never collapse into each other. `invalid_input` says
+# the caller should fix the request. `out_of_coverage` says the request was fine
+# and the subject is outside what this miner reads — nothing the caller can fix.
+# An answer says we read it. Reporting the second as the first is what the
+# manifest previously promised and the code did not do.
+
+
+@pytest.mark.parametrize(
+    "path,question",
+    [
+        ("/anomaly/check", "was BitConnect a scam"),
+        ("/anomaly/check", "how likely is FTX to be fraudulent"),
+        ("/wallet/balance", "how much does Coinbase hold"),
+        ("/transaction/lookup", "show me the biggest transaction yesterday"),
+    ],
+)
+def test_a_question_we_cannot_read_is_out_of_coverage_not_malformed(path, question):
+    payload = client.post(path, json={"query": question}).json()
+    assert payload["verdict"] == "out_of_coverage"
+    assert payload["confidence"] == 0.0
+    assert payload["data_source"] == "unavailable"
+    assert payload["subject"] == question
+    # It must say what it CAN do, so the caller learns the shape of an
+    # answerable question rather than just being refused.
+    assert len(payload["reasoning"]) > 200
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        ("/anomaly/check", {}),
+        ("/wallet/balance", {}),
+        ("/transaction/lookup", {}),
+        ("/transaction/lookup", {"tx_hash": "not-a-hash"}),
+        ("/anomaly/check", {"address": STAKE_HOT, "hours": 99999}),
+    ],
+)
+def test_a_malformed_request_stays_invalid_input(path, body):
+    payload = client.post(path, json=body).json()
+    assert payload["verdict"] == "invalid_input"
+    assert payload["confidence"] == 0.0
+
+
+def test_out_of_coverage_never_guesses_a_fraud_verdict():
+    """The canonical intent is wider than what this miner observes. The honest
+    miss is saying so — not inventing a rating for a company we cannot see."""
+    payload = client.post(
+        "/anomaly/check", json={"query": "how likely is Acme Corp to be fraudulent"}
+    ).json()
+    assert payload["verdict"] == "out_of_coverage"
+    assert payload["risk_tier"] == "insufficient_data"
+    assert payload["risk_score"] == 0.0
+    assert payload["is_suspicious"] is False
+    lowered = payload["reasoning"].lower()
+    for forbidden in ("is fraudulent", "is a scam", "confirmed fraud", "likely fraudulent"):
+        assert forbidden not in lowered
+
+
+def test_out_of_coverage_still_carries_the_declared_signal_fields():
+    payload = client.post("/wallet/balance", json={"query": "how rich is Binance"}).json()
+    for field in SIGNAL_FIELDS:
+        assert field in payload
+    # A balance that could not be read is null, never zero.
+    assert payload["native_balance_wei"] is None
+    assert payload["balance_native"] is None
+
+
+def test_manifest_out_of_coverage_claim_is_actually_implemented():
+    """The manifest tells callers an off-chain question is answered as out of
+    coverage. A manifest promise the service does not keep is worse than no
+    promise: it is scored as a failed answer."""
+    fraud = next(
+        e for e in MANIFEST["endpoints"]
+        if e["path"] == "/anomaly/check" and e["method"] == "POST"
+    )
+    assert "outside what this miner can observe" in fraud["description"]
+    payload = client.post(
+        "/anomaly/check", json={"query": "is the Acme pyramid scheme a fraud"}
+    ).json()
+    assert payload["verdict"] == "out_of_coverage"

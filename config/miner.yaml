@@ -368,9 +368,14 @@ endpoints:
       FRAUD_DETECTION. Answers "how likely is
       0x974caa59e49682cda0ad2bbe82983419a2ecc400 to be fraudulent", "is this
       address risky", "is it safe to receive funds from this wallet", "does
-      this address show suspicious activity". Assesses how likely a specific
-      on-chain address is to be fraudulent from bounded, observable transfer
-      evidence. Runs five named screens — round-trip return, transfer
+      this address show suspicious activity", "how likely is transaction
+      0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431 to be
+      fraudulent". Assesses how likely a specific on-chain address is to be
+      fraudulent from bounded, observable transfer evidence. Given a
+      transaction hash instead, it reports that transaction's facts and
+      assesses the observable behaviour of its SENDER, and says so explicitly:
+      the chain records no intent, so a verdict on a transaction itself is not
+      something this or any miner can read off it. Runs five named screens — round-trip return, transfer
       velocity, counterparty concentration, dust fan-in and repeated identical
       amounts — and returns risk_tier (one of insufficient_data, low_risk,
       elevated_risk, high_risk), a bounded deterministic risk_score between 0
@@ -393,9 +398,12 @@ endpoints:
       ENS name ending .eth; also accepted as wallet or account), chain
       (optional, one of ethereum, base, polygon, arbitrum, optimism, bsc,
       avalanche, solana, tron, bitcoin, default ethereum), hours (optional,
-      integer between 1 and 720, default 24), query (optional, the original
-      natural-language question — the address, chain and lookback window are
-      read out of it when address is not supplied). JSON body:
+      integer between 1 and 720, default 24), tx_hash (optional, 0x-prefixed
+      followed by exactly 64 hex characters — assess the parties to one
+      transaction instead of an address; also accepted as txHash or hash),
+      query (optional, the original natural-language question — the address,
+      transaction hash, chain and lookback window are read out of it when the
+      explicit field is not supplied). JSON body:
       {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
       "chain": "ethereum", "hours": 24}.
 

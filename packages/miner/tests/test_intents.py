@@ -1035,3 +1035,94 @@ def test_manifest_out_of_coverage_claim_is_actually_implemented():
         "/anomaly/check", json={"query": "is the Acme pyramid scheme a fraud"}
     ).json()
     assert payload["verdict"] == "out_of_coverage"
+
+
+# ── FRAUD_DETECTION over a transaction ───────────────────────────────────────
+# The canonical intent is "how likely a specific entity, TRANSACTION or action
+# is to be fraudulent". Only addresses were accepted, so a transaction question
+# — squarely inside the intent, and answerable from data already in hand — fell
+# through to out_of_coverage.
+
+
+def _stub_tx_for_fraud(monkeypatch, tx, receipt):
+    async def fake_rpc(client_, url, method, params):
+        if method == "eth_getTransactionByHash":
+            return tx
+        if method == "eth_getTransactionReceipt":
+            return receipt
+        if method == "eth_getBlockByNumber":
+            return {"timestamp": "0x66cb0000"}
+        return None
+
+    monkeypatch.setattr(onchain, "_rpc", fake_rpc)
+
+
+def test_a_transaction_is_a_valid_fraud_subject(monkeypatch, stub_transfers):
+    _stub_tx_for_fraud(monkeypatch, TX, {
+        "status": "0x1", "gasUsed": "0x5208",
+        "effectiveGasPrice": "0x3b9aca00", "logs": [],
+    })
+    stub_transfers([
+        _transfer(i, UNAFFILIATED if i % 2 else TX["from"],
+                  TX["from"] if i % 2 else UNAFFILIATED, 100.0 * (i + 1), mins=i * 90)
+        for i in range(12)
+    ])
+    payload = client.post(
+        "/anomaly/check",
+        json={"query": f"how likely is transaction {TX['hash']} to be fraudulent"},
+    ).json()
+
+    assert payload["verdict"] != "out_of_coverage"
+    assert payload["risk_tier"] in {"low_risk", "elevated_risk", "high_risk"}
+    ctx = payload["transaction"]
+    assert ctx["tx_hash"] == TX["hash"]
+    assert ctx["from_address"] == TX["from"]
+    assert ctx["screened_party"] == "from_address"
+    # The screened address is the sender, not the hash.
+    assert payload["address"] == TX["from"]
+
+
+def test_transaction_fraud_answer_states_what_it_actually_assessed(monkeypatch, stub_transfers):
+    """The chain records no intent. Claiming a verdict on the transaction
+    itself would be a claim the data cannot support; the honest answer names
+    the transaction's facts and assesses its originator's behaviour."""
+    _stub_tx_for_fraud(monkeypatch, TX, {
+        "status": "0x1", "gasUsed": "0x5208",
+        "effectiveGasPrice": "0x3b9aca00", "logs": [],
+    })
+    stub_transfers([
+        _transfer(i, UNAFFILIATED if i % 2 else TX["from"],
+                  TX["from"] if i % 2 else UNAFFILIATED, 100.0 * (i + 1), mins=i * 90)
+        for i in range(12)
+    ])
+    reasoning = client.post(
+        "/anomaly/check", json={"tx_hash": TX["hash"], "chain": "ethereum"}
+    ).json()["reasoning"]
+
+    assert "records no intent" in reasoning
+    # All three identifiers appear, so the answer matches a question phrased
+    # around any of them.
+    assert TX["hash"] in reasoning
+    assert TX["from"] in reasoning
+    assert TX["to"] in reasoning
+
+
+def test_an_unreadable_transaction_is_insufficient_data_not_a_clean_verdict(monkeypatch):
+    _stub_tx_for_fraud(monkeypatch, None, None)
+    payload = client.post(
+        "/anomaly/check", json={"tx_hash": TX["hash"], "chain": "ethereum"}
+    ).json()
+    assert payload["risk_tier"] == "insufficient_data"
+    assert payload["is_suspicious"] is False
+    assert payload["confidence"] == 0.0
+    assert payload["tx_hash"] == TX["hash"]
+
+
+def test_an_explicit_address_still_wins_over_a_hash_in_the_question(stub_transfers):
+    stub_transfers([])
+    payload = client.post(
+        "/anomaly/check",
+        json={"address": STAKE_HOT, "query": f"and what about {TX['hash']}"},
+    ).json()
+    assert payload["address"] == STAKE_HOT
+    assert payload["transaction"] is None

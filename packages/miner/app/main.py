@@ -480,13 +480,19 @@ def _from_query(data: Any, *, want: str) -> Any:
     if want == "tx_hash" and not merged.get("tx_hash"):
         if (m := _TX_HASH_RE.search(query)):
             merged["tx_hash"] = m.group(0)
-    if want == "address" and not merged.get("address"):
+    if want in {"address", "address_or_tx"} and not merged.get("address"):
         # A 64-hex hash contains no 40-hex substring match under \b anchoring,
         # so the address pattern cannot accidentally capture part of a hash.
         if (m := _ADDRESS_RE.search(query)):
             merged["address"] = m.group(0)
         elif (m := _ENS_RE.search(query)):
             merged["address"] = m.group(1).lower()
+    # FRAUD_DETECTION is canonically defined over "a specific entity,
+    # TRANSACTION or action", so a transaction hash is a valid subject for it
+    # and not only for ONCHAIN_TX_LOOKUP.
+    if want == "address_or_tx" and not merged.get("tx_hash"):
+        if (m := _TX_HASH_RE.search(query)):
+            merged["tx_hash"] = m.group(0)
     if not merged.get("chain") and (chain := _extract_chain(query)):
         merged["chain"] = chain
     if "hours" in merged and not merged.get("hours"):
@@ -566,11 +572,17 @@ class AnomalyRequest(BaseModel):
         description=" | ".join(DECLARED_CHAINS),
     )
     hours: int = Field(24, ge=1, le=720, description="Lookback window in hours")
+    # A transaction is a valid subject for this intent, not only an address.
+    tx_hash: str | None = Field(
+        None,
+        pattern=r"^0x[a-f0-9]{64}$",
+        description="Assess the parties to one transaction instead of an address",
+    )
     query: str | None = Field(
         None,
         description=(
-            "Original natural-language question; address, chain and window are "
-            "extracted from it when not supplied explicitly"
+            "Original natural-language question; address, transaction hash, "
+            "chain and window are extracted from it when not supplied explicitly"
         ),
     )
 
@@ -578,7 +590,14 @@ class AnomalyRequest(BaseModel):
     @classmethod
     def _accept_aliases(cls, data: Any) -> Any:
         data = _first_alias(data, "address", ("wallet", "wallet_address", "account", "addr", "ens"))
-        data = _from_query(data, want="address")
+        data = _first_alias(
+            data, "tx_hash",
+            ("txHash", "hash", "transaction_hash", "transactionHash"),
+        )
+        data = _from_query(data, want="address_or_tx")
+        if isinstance(data, dict) and isinstance(data.get("tx_hash"), str):
+            data = dict(data)
+            data["tx_hash"] = data["tx_hash"].strip().lower()
         data = _first_alias(data, "chain", ("network", "chain_id", "chainId"))
         data = _first_alias(data, "hours", ("window_hours", "lookback_hours", "hours_back"))
         if isinstance(data, dict):
@@ -1473,6 +1492,36 @@ async def anomaly_check_endpoint(req: AnomalyRequest) -> dict[str, Any]:
     label is `risk_tier`; `verdict` carries the same finding in the older
     vocabulary so existing consumers keep working.
     """
+    # A transaction is a valid subject for this intent. Screening it means
+    # screening its SENDER's observable behaviour and reporting the transaction's
+    # own facts alongside — the chain does not record intent, so "is this
+    # transaction fraudulent" is answerable only as "here is what it did and how
+    # its originator behaves". Saying that precisely is the honest answer; a
+    # verdict on the transaction itself would not be.
+    if not req.address and req.tx_hash:
+        transaction, unavailable = await transaction_lookup(req.tx_hash, req.chain)
+        if transaction is None:
+            return _stamp({
+                "tx_hash": req.tx_hash,
+                "chain": req.chain,
+                "risk_tier": "insufficient_data",
+                "risk_score": 0.0,
+                "is_suspicious": False,
+                "verdict": "unavailable",
+                "confidence": 0.0,
+                "reasoning": (
+                    f"Transaction {req.tx_hash} on {req.chain} could not be read "
+                    f"({unavailable}), so its parties were not screened and no risk "
+                    "characterisation is offered."
+                ),
+                "data_source": "unavailable",
+                "coverage_complete": False,
+            })
+        req = req.model_copy(update={"address": transaction.from_addr})
+        subject_transaction = transaction
+    else:
+        subject_transaction = None
+
     if not req.address:
         return _out_of_coverage(
             subject=(req.query or "").strip() or None,
@@ -1524,9 +1573,31 @@ async def anomaly_check_endpoint(req: AnomalyRequest) -> dict[str, Any]:
     else:
         confidence = 0.85 if a.coverage_complete else 0.6
 
+    transaction_context = None
+    if subject_transaction is not None:
+        transaction_context = {
+            "tx_hash": subject_transaction.tx_hash,
+            "status": subject_transaction.status,
+            "block_number": subject_transaction.block_number,
+            "from_address": subject_transaction.from_addr,
+            "to_address": subject_transaction.to_addr,
+            "value_wei": str(subject_transaction.value_wei),
+            "screened_party": "from_address",
+        }
+        reasoning = (
+            f"Transaction {subject_transaction.tx_hash} on {subject_transaction.chain} "
+            f"{subject_transaction.status}, sending {_units(subject_transaction.value_wei)} "
+            f"{NATIVE_SYMBOL.get(subject_transaction.chain, 'ETH')} from "
+            f"{subject_transaction.from_addr} to "
+            f"{subject_transaction.to_addr or 'a newly deployed contract'}. "
+            "The chain records no intent, so what can be assessed is the behaviour "
+            f"of its originator: {reasoning}"
+        )
+
     return _stamp({
         # ── Direct answer ────────────────────────────────────────────────
         "address": a.address,
+        "transaction": transaction_context,
         "ens_name": ens_name,
         "chain": a.chain,
         "window_hours": a.window_hours,

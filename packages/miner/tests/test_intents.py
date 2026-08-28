@@ -19,6 +19,7 @@ contract, not about the chain. Determinism is asserted directly.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -748,3 +749,206 @@ def test_balance_and_association_reads_do_not_serialize(monkeypatch):
     elapsed = __import__("time").monotonic() - started
 
     assert elapsed < 0.75, f"reads serialized: {elapsed:.2f}s for two 0.4s reads"
+
+
+# ── Manifest ↔ implementation contract ───────────────────────────────────────
+# The registered YAML is how the Telegraph router decides which endpoint serves
+# an intent AND how it builds the request. Every claim it makes is therefore a
+# promise the service has to keep, and a promise it cannot keep is scored as a
+# failed answer rather than a bad one. These tests pin the manifest to the code.
+
+import pathlib
+
+import yaml
+
+MANIFEST = yaml.safe_load(
+    (pathlib.Path(__file__).resolve().parents[3] / "config" / "miner.yaml").read_text()
+)
+
+# The documented closed sets. A key outside them fails registration outright:
+# "Additional property <name> is not allowed".
+_ALLOWED_TOP = {
+    "version", "kind", "id", "slug", "protocol", "name", "description", "base_url",
+    "input_schema", "output_schema", "polling", "cache_ttl_sec", "rate_limit_per_sec",
+    "circuit_threshold", "circuit_cooldown_seconds", "docs", "limitations", "errors",
+    "auth", "endpoints", "semantics", "on_chain",
+}
+_ALLOWED_ENDPOINT = {
+    "path", "external_path", "method", "description", "endpoint_base_url",
+    "content_type", "multipart_fields", "param_map",
+}
+
+
+def test_manifest_uses_only_documented_top_level_keys():
+    extra = set(MANIFEST) - _ALLOWED_TOP
+    assert not extra, f"(root): Additional property {sorted(extra)} is not allowed"
+
+
+def test_manifest_endpoints_use_only_the_eight_documented_keys():
+    """`params:` and `intents:` are NOT endpoint keys — the schema rejects them.
+    Both belong inside the description string."""
+    for i, endpoint in enumerate(MANIFEST["endpoints"]):
+        extra = set(endpoint) - _ALLOWED_ENDPOINT
+        assert not extra, f"endpoints.{i} ({endpoint.get('path')}): {sorted(extra)} not allowed"
+        assert {"path", "external_path", "method"} <= set(endpoint)
+
+
+def test_signal_mapping_matches_what_every_response_returns():
+    mapping = MANIFEST["semantics"]["signal_mapping"]
+    assert set(mapping) <= {"confidence_field", "label_field", "reason_field"}
+    assert mapping["confidence_field"] == "confidence"
+    assert mapping["label_field"] == "verdict"
+    assert mapping["reason_field"] == "reasoning"
+
+
+def test_every_declared_intent_names_itself_in_an_endpoint_description():
+    """The router reads the description to pick an endpoint. An intent that
+    appears nowhere in one has no endpoint the router can select."""
+    for intent in MANIFEST["semantics"]["supported_intents"]:
+        serving = [
+            e for e in MANIFEST["endpoints"]
+            if (e.get("description") or "").lstrip().startswith(intent)
+        ]
+        assert serving, f"{intent} is declared but no endpoint description leads with it"
+
+
+def test_no_endpoint_example_contains_a_truncated_identifier():
+    """A shortened address or hash in an example teaches the request builder to
+    send one, and a shortened address fails our own validator. This was live:
+    the manifest carried `{"address": "0x974caa...c400"}` as the documented
+    request shape for two of the three intent endpoints."""
+    blob = yaml.dump(MANIFEST)
+    hits = re.findall(r"0x[0-9a-fA-F]{2,10}(?:\.\.\.|…)", blob)
+    assert not hits, f"truncated identifiers in manifest examples: {hits[:5]}"
+
+
+def test_intent_endpoints_declare_their_params():
+    """Ahmed's point, in the form the schema actually allows: the params and
+    their descriptions live in the description text, because there is no
+    `params` key."""
+    for endpoint in MANIFEST["endpoints"]:
+        desc = (endpoint.get("description") or "").lstrip()
+        if not any(desc.startswith(i) for i in MANIFEST["semantics"]["supported_intents"]):
+            continue
+        assert "aram" in desc, f"{endpoint['method']} {endpoint['path']} declares no params"
+
+
+def test_non_intent_endpoints_do_not_compete_for_intent_routing():
+    intents = set(MANIFEST["semantics"]["supported_intents"])
+    for endpoint in MANIFEST["endpoints"]:
+        desc = (endpoint.get("description") or "").lstrip()
+        if any(desc.startswith(i) for i in intents):
+            continue
+        assert "NOT an intent target" in desc, (
+            f"{endpoint['method']} {endpoint['path']} neither serves an intent "
+            "nor says it is not an intent target"
+        )
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [(e["method"], e["path"]) for e in MANIFEST["endpoints"]
+     if any((e.get("description") or "").lstrip().startswith(i)
+            for i in MANIFEST["semantics"]["supported_intents"])],
+)
+def test_every_declared_intent_route_is_actually_served(method, path, offline):
+    """A manifest entry with no route behind it is a guaranteed failed answer."""
+    body = {
+        "tx_hash": "0x" + "a" * 64,
+        "address": STAKE_HOT,
+        "chain": "ethereum",
+        "hours": 24,
+    }
+    if method == "GET":
+        response = client.get(path, params=body)
+    else:
+        response = client.post(path, json=body)
+    assert response.status_code == 200, f"{method} {path} -> {response.status_code}"
+    payload = response.json()
+    assert payload.get("verdict") != "invalid_input"
+    for field in SIGNAL_FIELDS:
+        assert field in payload
+
+
+# ── Natural-language intake and ENS ──────────────────────────────────────────
+
+
+def test_transaction_hash_is_extracted_from_a_plain_question(offline):
+    tx = "0x" + "b" * 64
+    payload = client.post(
+        "/transaction/lookup",
+        json={"query": f"what is the status of transaction {tx} on base"},
+    ).json()
+    assert payload["tx_hash"] == tx
+    assert payload["chain"] == "base"
+
+
+def test_address_chain_and_window_are_extracted_from_a_plain_question(stub_transfers):
+    stub_transfers([])
+    payload = client.post(
+        "/anomaly/check",
+        json={"query": f"how likely is {STAKE_HOT} to be fraudulent over the last 3 days on polygon"},
+    ).json()
+    assert payload["address"] == STAKE_HOT
+    assert payload["chain"] == "polygon"
+    assert payload["window_hours"] == 72
+
+
+def test_explicit_fields_beat_extraction(offline):
+    """Extraction is a fallback for the router shape that passes the raw
+    question, never a reinterpretation of a caller who already said what
+    they meant."""
+    explicit = "0x" + "c" * 64
+    payload = client.post(
+        "/transaction/lookup",
+        json={"tx_hash": explicit, "query": "status of 0x" + "d" * 64},
+    ).json()
+    assert payload["tx_hash"] == explicit
+
+
+def test_an_ens_name_is_accepted_and_resolved(monkeypatch, stub_balance):
+    import app.main as main
+
+    async def fake_resolve(name):
+        return "0xd8da6bf26964af9d7eed9e03e53415d37aa96045", "live"
+
+    monkeypatch.setattr(main, "resolve_ens", fake_resolve)
+    stub_balance(10**18)
+    payload = client.post("/wallet/balance", json={"address": "vitalik.eth"}).json()
+    assert payload["ens_name"] == "vitalik.eth"
+    assert payload["address"] == "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
+    # Both the name asked about and the address it resolved to are in the text.
+    assert "vitalik.eth" in payload["reasoning"]
+    assert "0xd8da6bf26964af9d7eed9e03e53415d37aa96045" in payload["reasoning"]
+
+
+def test_an_unresolvable_ens_name_is_never_answered_against_another_account(monkeypatch):
+    import app.main as main
+
+    async def fake_resolve(name):
+        return None, f"no ENS resolver is registered for {name}"
+
+    monkeypatch.setattr(main, "resolve_ens", fake_resolve)
+    payload = client.post("/wallet/balance", json={"address": "nosuchname12345.eth"}).json()
+    assert payload["verdict"] == "unresolved_name"
+    assert payload["native_balance_wei"] is None
+    assert payload["balance_native"] is None
+    assert payload["confidence"] == 0.0
+
+
+def test_keccak256_matches_published_vectors():
+    """ENS namehash is only correct if this is Keccak-256 and not SHA3-256 —
+    they differ by one padding byte and produce entirely different digests."""
+    from app.onchain import _keccak, _namehash
+
+    assert _keccak(b"").hex() == (
+        "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+    )
+    assert _keccak(b"abc").hex() == (
+        "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45"
+    )
+    # EIP-137 namehash of "eth".
+    assert _namehash("eth").hex() == (
+        "93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae"
+    )
+    assert _namehash("").hex() == "00" * 32

@@ -27,6 +27,7 @@ A miner that throws is a miner that scores zero.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -48,6 +49,7 @@ from .onchain import (
     NATIVE_SYMBOL,
     BalanceSnapshot,
     balance_snapshot,
+    resolve_ens,
     circuit_status,
     request_deadline,
     transaction_lookup,
@@ -414,6 +416,86 @@ def _normalize_chain(value: Any) -> Any:
     return _CHAIN_ALIASES.get(cleaned, cleaned)
 
 
+# ── Natural-language intake ──────────────────────────────────────────────────
+# The Telegraph router classifies a plain-language question into an intent, picks
+# a miner, then has to BUILD the HTTP call from the endpoint's declared params.
+# Two things follow, and both were costing every fraud and balance call:
+#
+#   1. Some routers pass the question through as `{"query": "..."}` rather than
+#      pre-parsed fields. Rejecting that shape is a guaranteed zero, so the
+#      identifiers are extracted from the sentence instead.
+#   2. `WALLET_BALANCE_CHECK` is canonically defined over "a specific blockchain
+#      address OR ENS NAME". An ENS name has to be accepted at the boundary or
+#      the whole ENS share of that intent's traffic is unanswerable.
+#
+# Extraction is deliberately strict: it matches only shapes that cannot be
+# anything else. A 64-hex string is a transaction hash, a 40-hex string is an
+# address, `something.eth` is an ENS name. Nothing is guessed from context.
+
+_TX_HASH_RE = re.compile(r"\b0x[a-fA-F0-9]{64}\b")
+_ADDRESS_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
+_ENS_RE = re.compile(r"\b([a-z0-9][a-z0-9-]{2,62}\.eth)\b", re.IGNORECASE)
+# Only chains this miner actually indexes, plus the spellings a question uses.
+_CHAIN_WORDS: tuple[tuple[str, str], ...] = (
+    ("ethereum", "ethereum"), ("mainnet", "ethereum"), ("eth ", "ethereum"),
+    ("base", "base"), ("polygon", "polygon"), ("matic", "polygon"),
+    ("arbitrum", "arbitrum"), ("optimism", "optimism"),
+    ("bsc", "bsc"), ("binance smart chain", "bsc"), ("bnb", "bsc"),
+    ("avalanche", "avalanche"), ("avax", "avalanche"),
+    ("solana", "solana"), ("tron", "tron"), ("bitcoin", "bitcoin"),
+)
+_HOURS_RE = re.compile(r"\b(\d{1,3})\s*(hours?|hrs?|h)\b", re.IGNORECASE)
+_DAYS_RE = re.compile(r"\b(\d{1,2})\s*(days?|d)\b", re.IGNORECASE)
+
+
+def _extract_chain(text: str) -> str | None:
+    lowered = f" {text.lower()} "
+    for needle, chain in _CHAIN_WORDS:
+        if needle in lowered:
+            return chain
+    return None
+
+
+def _extract_hours(text: str) -> int | None:
+    if (m := _HOURS_RE.search(text)):
+        return max(1, min(720, int(m.group(1))))
+    if (m := _DAYS_RE.search(text)):
+        return max(1, min(720, int(m.group(1)) * 24))
+    return None
+
+
+def _from_query(data: Any, *, want: str) -> Any:
+    """Fill canonical fields from a natural-language `query`, without overwriting.
+
+    `want` is "tx_hash" or "address". Explicit fields always win — extraction is
+    a fallback for the router shape that hands over the raw question, never a
+    reinterpretation of a caller who already said what they meant.
+    """
+    if not isinstance(data, dict):
+        return data
+    query = data.get("query") or data.get("question") or data.get("q")
+    if not isinstance(query, str) or not query.strip():
+        return data
+    merged = dict(data)
+    if want == "tx_hash" and not merged.get("tx_hash"):
+        if (m := _TX_HASH_RE.search(query)):
+            merged["tx_hash"] = m.group(0)
+    if want == "address" and not merged.get("address"):
+        # A 64-hex hash contains no 40-hex substring match under \b anchoring,
+        # so the address pattern cannot accidentally capture part of a hash.
+        if (m := _ADDRESS_RE.search(query)):
+            merged["address"] = m.group(0)
+        elif (m := _ENS_RE.search(query)):
+            merged["address"] = m.group(1).lower()
+    if not merged.get("chain") and (chain := _extract_chain(query)):
+        merged["chain"] = chain
+    if "hours" in merged and not merged.get("hours"):
+        merged.pop("hours")
+    if (hours := _extract_hours(query)) and not merged.get("hours"):
+        merged["hours"] = hours
+    return merged
+
+
 def _first_alias(data: Any, canonical: str, aliases: tuple[str, ...]) -> Any:
     """Fill `canonical` from the first present alias, without overwriting it."""
     if not isinstance(data, dict):
@@ -430,17 +512,28 @@ def _first_alias(data: Any, canonical: str, aliases: tuple[str, ...]) -> Any:
 
 
 class WalletTraceRequest(BaseModel):
-    address: str = Field(..., description="Wallet address (0x-prefixed, 40 hex chars)")
+    address: str = Field(
+        ...,
+        description=(
+            "Wallet address: 0x-prefixed 40 hex characters, an ENS name ending "
+            ".eth, or a native address for solana/tron/bitcoin"
+        ),
+    )
     chain: str = Field(
         "ethereum",
         pattern=_CHAIN_PATTERN,
         description=" | ".join(DECLARED_CHAINS),
     )
+    query: str | None = Field(
+        None,
+        description="Original natural-language question; address and chain are extracted from it",
+    )
 
     @model_validator(mode="before")
     @classmethod
     def _accept_aliases(cls, data: Any) -> Any:
-        data = _first_alias(data, "address", ("wallet", "wallet_address", "account", "addr"))
+        data = _first_alias(data, "address", ("wallet", "wallet_address", "account", "addr", "ens"))
+        data = _from_query(data, want="address")
         data = _first_alias(data, "chain", ("network", "chain_id", "chainId"))
         if isinstance(data, dict):
             data = dict(data)
@@ -452,18 +545,32 @@ class WalletTraceRequest(BaseModel):
 
 
 class AnomalyRequest(BaseModel):
-    address: str = Field(..., description="Wallet address to screen")
+    address: str = Field(
+        ...,
+        description=(
+            "Address to screen: 0x-prefixed 40 hex characters, an ENS name, or a "
+            "native solana/tron/bitcoin address"
+        ),
+    )
     chain: str = Field(
         "ethereum",
         pattern=_CHAIN_PATTERN,
         description=" | ".join(DECLARED_CHAINS),
     )
     hours: int = Field(24, ge=1, le=720, description="Lookback window in hours")
+    query: str | None = Field(
+        None,
+        description=(
+            "Original natural-language question; address, chain and window are "
+            "extracted from it when not supplied explicitly"
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
     def _accept_aliases(cls, data: Any) -> Any:
-        data = _first_alias(data, "address", ("wallet", "wallet_address", "account", "addr"))
+        data = _first_alias(data, "address", ("wallet", "wallet_address", "account", "addr", "ens"))
+        data = _from_query(data, want="address")
         data = _first_alias(data, "chain", ("network", "chain_id", "chainId"))
         data = _first_alias(data, "hours", ("window_hours", "lookback_hours", "hours_back"))
         if isinstance(data, dict):
@@ -482,6 +589,10 @@ class TransactionLookupRequest(BaseModel):
     # is reported as invalid_input, not looked up.
     tx_hash: str = Field(..., pattern=r"^0x[a-f0-9]{64}$")
     chain: str = Field("ethereum", pattern=_CHAIN_PATTERN)
+    query: str | None = Field(
+        None,
+        description="Original natural-language question; hash and chain are extracted from it",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -490,6 +601,7 @@ class TransactionLookupRequest(BaseModel):
             data, "tx_hash",
             ("txHash", "hash", "transaction_hash", "transactionHash", "txhash", "tx"),
         )
+        data = _from_query(data, want="tx_hash")
         data = _first_alias(data, "chain", ("network", "chain_id", "chainId"))
         if isinstance(data, dict):
             data = dict(data)
@@ -1014,9 +1126,27 @@ def _units(raw: int | None, decimals: int = 18) -> str | None:
     return f"{sign}{whole}.{str(frac).rjust(decimals, '0').rstrip('0')}"
 
 
+async def _resolve_subject(raw: str, chain: str) -> tuple[str, str | None, str | None]:
+    """Turn whatever the caller named into an address we can read.
+
+    Returns (address, ens_name, failure_reason). An ENS name that does not
+    resolve returns the reason and no address — the caller asked about a
+    specific name, and answering with a different account, or with a zero
+    balance, would be worse than saying it could not be resolved.
+    """
+    subject = (raw or "").strip()
+    if subject.lower().endswith(".eth"):
+        resolved, reason = await resolve_ens(subject)
+        if resolved is None:
+            return subject, subject, reason
+        return resolved, subject.lower(), None
+    return subject, None, None
+
+
 def _balance_reasoning(
     snapshot, token_rows: list[dict], labeled, wallet_claim,
     associations: list[dict], association_status: str,
+    ens_name: str | None = None,
 ) -> str:
     """State the balance, exactly, with the address written out in full.
 
@@ -1025,7 +1155,11 @@ def _balance_reasoning(
     consumer or scorer can match it back to the one that was asked about. The
     address is written in full here, once, as the subject of the first sentence.
     """
-    addr = snapshot.address
+    # Name both the ENS the caller used and the address it resolved to. Either
+    # alone leaves the answer unmatchable against a question that used the other.
+    addr = (
+        f"{ens_name} ({snapshot.address})" if ens_name else snapshot.address
+    )
     if snapshot.data_source == "unavailable" or snapshot.native_amount is None:
         return (
             f"Balance for {addr} on {snapshot.chain} could not be read: "
@@ -1094,7 +1228,25 @@ async def wallet_trace_endpoint(req: WalletTraceRequest) -> dict[str, Any]:
     available; `/wallet/trace` is the path the manifest declares and keeps
     working unchanged.
     """
-    address = req.address
+    address, ens_name, ens_failure = await _resolve_subject(req.address, req.chain)
+    if ens_failure:
+        return _stamp({
+            "address": req.address,
+            "ens_name": ens_name,
+            "chain": req.chain,
+            "balance_status": "unavailable",
+            "native_balance_wei": None,
+            "native_balance": None,
+            "balance_native": None,
+            "verdict": "unresolved_name",
+            "confidence": 0.0,
+            "reasoning": (
+                f"{req.address} could not be resolved to an address: {ens_failure}. "
+                "No balance is reported. Answering with a different account, or with "
+                "zero, would be worse than saying the name did not resolve."
+            ),
+            "data_source": "unavailable",
+        })
     labeled = resolve_address(address)
     wallet_claim = resolve_wallet(address)
 
@@ -1157,6 +1309,7 @@ async def wallet_trace_endpoint(req: WalletTraceRequest) -> dict[str, Any]:
     return _stamp({
         # ── Direct balance facts ─────────────────────────────────────────
         "address": snapshot.address,
+        "ens_name": ens_name,
         "chain": snapshot.chain,
         "block_number": snapshot.block_number,
         "native_symbol": snapshot.native_symbol,
@@ -1186,7 +1339,7 @@ async def wallet_trace_endpoint(req: WalletTraceRequest) -> dict[str, Any]:
         ),
         "reasoning": _balance_reasoning(
             snapshot, token_rows, labeled, wallet_claim,
-            associations, association_status,
+            associations, association_status, ens_name,
         ),
         "data_source": snapshot.data_source,
         "classification": "observed" if labeled else "calculated",
@@ -1230,7 +1383,27 @@ async def anomaly_check_endpoint(req: AnomalyRequest) -> dict[str, Any]:
     label is `risk_tier`; `verdict` carries the same finding in the older
     vocabulary so existing consumers keep working.
     """
-    a = await analytics.risk_assessment(req.address, req.chain, req.hours)
+    address, ens_name, ens_failure = await _resolve_subject(req.address, req.chain)
+    if ens_failure:
+        return _stamp({
+            "address": req.address,
+            "ens_name": ens_name,
+            "chain": req.chain,
+            "window_hours": req.hours,
+            "risk_tier": "insufficient_data",
+            "risk_score": 0.0,
+            "is_suspicious": False,
+            "verdict": "unavailable",
+            "confidence": 0.0,
+            "reasoning": (
+                f"{req.address} could not be resolved to an address: {ens_failure}. "
+                "No screening was performed, so no risk characterisation is offered. "
+                "This is unresolved input, not a clean result."
+            ),
+            "data_source": "unavailable",
+            "coverage_complete": False,
+        })
+    a = await analytics.risk_assessment(address, req.chain, req.hours)
     is_suspicious = a.risk_tier in _ELEVATED_TIERS
     reasoning = analytics._risk_reasoning(a)
 
@@ -1247,6 +1420,7 @@ async def anomaly_check_endpoint(req: AnomalyRequest) -> dict[str, Any]:
     return _stamp({
         # ── Direct answer ────────────────────────────────────────────────
         "address": a.address,
+        "ens_name": ens_name,
         "chain": a.chain,
         "window_hours": a.window_hours,
         "risk_score": a.risk_score,
@@ -1289,6 +1463,60 @@ async def anomaly_check_endpoint(req: AnomalyRequest) -> dict[str, Any]:
             "They are not a finding of fraud and infer no identity or intent."
         ),
     })
+
+
+# ── GET aliases for the three intent endpoints ───────────────────────────────
+# The router builds a call from the endpoint's declared params. A query string
+# is materially easier to build correctly than a JSON body, and the miners
+# leading these intents expose GET forms, so both conventions are offered. Each
+# GET handler constructs the same request model the POST handler uses and
+# delegates to it — there is one implementation, so the two shapes cannot drift.
+
+
+@app.get("/transaction/lookup", tags=["ONCHAIN_TX_LOOKUP"])
+async def transaction_lookup_get(
+    tx_hash: str | None = None,
+    hash: str | None = None,
+    txHash: str | None = None,
+    chain: str = "ethereum",
+    query: str | None = None,
+) -> dict[str, Any]:
+    return await transaction_lookup_endpoint(
+        TransactionLookupRequest.model_validate({
+            "tx_hash": tx_hash or hash or txHash, "chain": chain, "query": query,
+        })
+    )
+
+
+@app.get("/wallet/balance", tags=["WALLET_BALANCE_CHECK"])
+@app.get("/wallet/trace", tags=["WALLET_BALANCE_CHECK"])
+async def wallet_balance_get(
+    address: str | None = None,
+    wallet: str | None = None,
+    chain: str = "ethereum",
+    query: str | None = None,
+) -> dict[str, Any]:
+    return await wallet_trace_endpoint(
+        WalletTraceRequest.model_validate({
+            "address": address or wallet, "chain": chain, "query": query,
+        })
+    )
+
+
+@app.get("/anomaly/check", tags=["FRAUD_DETECTION"])
+async def anomaly_check_get(
+    address: str | None = None,
+    wallet: str | None = None,
+    chain: str = "ethereum",
+    hours: int = 24,
+    query: str | None = None,
+) -> dict[str, Any]:
+    return await anomaly_check_endpoint(
+        AnomalyRequest.model_validate({
+            "address": address or wallet, "chain": chain,
+            "hours": hours, "query": query,
+        })
+    )
 
 
 # ── Catalog ──────────────────────────────────────────────────────────────────

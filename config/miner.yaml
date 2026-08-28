@@ -5,48 +5,45 @@ slug: degenlens-onchain
 protocol: generic
 name: DegenMiner Evidence-Backed On-Chain Gambling Intelligence
 description: >
-  DegenMiner is an evidence-first Telegraph Protocol intelligence miner for
-  agents, analysts, investigators, compliance teams, and automated workflows
-  that need structured information about observable on-chain activity connected
-  to crypto gambling operators. It queries supported EVM networks for canonical
-  transaction receipts, native balances, token and native-asset transfers,
-  timestamps, counterparties, contract inputs, gas data, and current wallet
-  holdings. These direct chain observations are joined to a versioned public
-  attribution registry in which every operator-wallet claim records its chain,
-  role, source, evidence status, review date, and confidence ceiling. The miner
-  then applies deterministic and reproducible calculations to produce bounded
-  intelligence about attributed operator inflows and outflows, net directional
-  flow, transfer counts, unique counterparties, network and asset composition,
-  large transfers, time-series activity, counterparty concentration, observable
-  treasury holdings, infrastructure-provider exposure, cross-operator wallet
-  overlap, player-candidate settlement patterns, attribution candidates, label
-  health, and explainable anomaly indicators. Its three canonical Telegraph
-  intents are ONCHAIN_TX_LOOKUP for verifiable transaction and attributed-flow
-  analysis, WALLET_BALANCE_CHECK for balances, holdings, wallet associations,
-  and observable settlement exposure, and FRAUD_DETECTION for deterministic
-  risk triage based on patterns such as round trips, unusual velocity, and
-  clustered behavior. Results are intended for investigation, monitoring, due
-  diligence, market research, attribution review, and risk prioritization; they
-  are not final legal, compliance, identity, credit, or enforcement decisions.
-  Every inference response exposes a normalized confidence score from 0 to 1, a
-  concise verdict, human-readable reasoning, data_source provenance, timestamps,
-  coverage status, and endpoint-specific caveats. Confidence expresses the
-  strength of support for the returned answer, not certainty about a person,
-  operator, wager, or offense. It is reduced when attribution is unverified,
-  pagination is incomplete, an upstream provider is unavailable, or a conclusion
-  is derived rather than directly observed. Live, registry, derived, unavailable,
-  and local-development demo data are explicitly distinguished; production is
-  configured to reject synthetic data. Multi-chain and multi-wallet reads are
-  bounded by declared lookback, pagination, concurrency, cache, circuit-breaker,
-  and request-deadline controls so failures return an honest low-confidence
-  unavailable result instead of fabricated values. DegenMiner never treats an
-  unattributed operator, unsupported chain, failed provider read, or incomplete
-  traversal as zero activity. It also does not claim access to private casino or
-  sportsbook ledgers, individual bets, game outcomes, account balances held
-  inside an operator, customer identity, beneficial ownership, operator revenue,
-  liabilities, profitability, solvency, or proof of criminal fraud. An inbound
-  or outbound transfer alone does not prove a deposit, withdrawal, wager, win,
-  loss, ownership relationship, source of funds, or user intent.
+  Serves three canonical intents over live EVM and non-EVM chain data.
+  ONCHAIN_TX_LOOKUP: given a transaction hash, returns that transaction's
+  status (confirmed, reverted, pending, or not_found), block number and
+  timestamp, sender, recipient, value in wei and native units, gas limit, gas
+  used, effective gas price, total fee, method id, and every ERC-20 transfer
+  decoded from the receipt logs. WALLET_BALANCE_CHECK: given an address or an
+  ENS name, returns its current native balance in exact base units and human
+  units with the asset symbol, the block the read reflects, and ERC-20 token
+  balances with contract, symbol, decimals and amounts. FRAUD_DETECTION: given
+  an address, returns how likely it is to be fraudulent as a bounded 0-1
+  risk_score and a risk_tier of insufficient_data, low_risk, elevated_risk, or
+  high_risk, backed by five named screens — round-trip return, transfer
+  velocity, counterparty concentration, dust fan-in, repeated identical amounts
+  — each reporting its measurement whether or not it fired, with known
+  exchange, bridge, DEX-router and gambling-operator counterparties identified
+  so ordinary settlement is not reported as fraud.
+
+  Chains indexed: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche,
+  solana, tron, bitcoin. Every response carries confidence, verdict, reasoning,
+  data_source, and a served_at timestamp.
+
+  Honesty posture, which is load-bearing rather than decorative. A provider that
+  cannot be read returns null and data_source "unavailable" — never a zero
+  balance and never a clean risk verdict, because both are indistinguishable
+  from a real observation and both would be false. An address with too little
+  history to characterise returns insufficient_data, not low_risk. Risk tiers
+  rank review priority from observable transfer patterns; they are never a
+  finding of fraud and infer no identity or intent. Coverage for FRAUD_DETECTION
+  is on-chain addresses and transactions; a question about a named company,
+  brand, or other off-chain entity is outside what this miner can observe and is
+  answered as out of coverage with confidence 0 rather than guessed.
+
+  Beyond the three intents the same deployment serves the DegenLens application:
+  a reviewed registry of crypto-gambling operator wallet clusters and derived
+  flow, treasury, counterparty, and attribution analytics. Those endpoints are
+  documented below but are explicitly not intent targets. This miner does not
+  claim access to private casino ledgers, individual bets, game outcomes,
+  customer identity, operator revenue, or solvency; an inbound or outbound
+  transfer alone proves no deposit, wager, win, loss, or ownership relationship.
 
 # The combined DegenLens deployment serves both the web UI and miner API.
 base_url: https://degenlensv1.up.railway.app
@@ -92,9 +89,27 @@ input_schema:
       examples: ["stake", "shuffle"]
     address:
       type: string
-      pattern: "^0x[a-fA-F0-9]{40}$"
-      description: "EVM wallet address to trace or screen."
-      examples: ["0x974caa59e49682cda0ad2bbe82983419a2ecc400"]
+      description: >
+        Subject of a balance or risk question. Either a 0x-prefixed EVM address
+        of exactly 40 hex characters, an ENS name ending .eth (resolved on-chain
+        through the ENS registry; a name with no resolver is reported as
+        unresolved rather than answered against another account), or a native
+        Solana, Tron, or Bitcoin address. Also accepted as wallet, account, or
+        ens. Never abbreviate it — a shortened address is a different string and
+        is rejected as invalid input.
+      examples:
+        - "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+        - "vitalik.eth"
+    query:
+      type: string
+      description: >
+        The original natural-language question. Optional on every intent
+        endpoint and used only as a fallback: when address or tx_hash is not
+        supplied, the transaction hash, address, ENS name, chain, and lookback
+        window are read out of this string. Explicit fields always win.
+      examples:
+        - "how much ETH does 0x974caa59e49682cda0ad2bbe82983419a2ecc400 hold"
+        - "how likely is vitalik.eth to be fraudulent"
     chain:
       type: string
       enum: [ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin]
@@ -108,7 +123,13 @@ input_schema:
     tx_hash:
       type: string
       pattern: "^0x[a-fA-F0-9]{64}$"
-      description: "Canonical EVM transaction hash."
+      description: >
+        Canonical EVM transaction hash: 0x followed by exactly 64 hex
+        characters. Also accepted as txHash, hash, transaction_hash, or
+        transactionHash. Never abbreviate it — a shortened hash identifies no
+        transaction and is rejected as invalid input.
+      examples:
+        - "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
 
 output_schema:
   type: object
@@ -241,26 +262,159 @@ endpoints:
   - path: /transaction/lookup
     external_path: /transaction/lookup
     method: POST
+    content_type: application/json
     description: >
-      Canonical transaction lookup by chain and transaction hash. Returns direct
-      RPC facts: status (confirmed, reverted, or pending — all distinguishable
-      from not_found), block number, block hash, block timestamp, transaction
-      index, nonce, sender, recipient, native value in wei and human units with
-      the native symbol, gas limit, gas used, effective gas price, total fee,
-      deployed contract address, method id, calldata, and ERC-20 transfers
-      decoded from the receipt logs with contract, symbol, decimals, and exact
-      raw amounts. Where token decimals are unknown the raw amount is returned
-      and the scaled amount is null rather than assuming 18 decimals. Operator
-      attribution is a separately labelled layer; a missing registry match is
-      returned as unattributed, not as proof that the transaction has no
-      gambling relationship. Accepts tx_hash, txHash, hash, transaction_hash, or
-      transactionHash.
-      REQUEST: {"tx_hash": "0x...", "chain": "ethereum"}
+      ONCHAIN_TX_LOOKUP. Answers "what is the status of transaction
+      0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431",
+      "did this tx hash succeed or revert", "what did transaction 0x... do on
+      base", "how much gas did this transaction use". Takes one transaction
+      hash and returns its direct RPC facts: status (confirmed, reverted,
+      pending, or not_found — all four distinguishable), block number, block
+      hash, block timestamp, transaction index, nonce, from address, to
+      address, value in wei and in native units with the asset symbol, gas
+      limit, gas used, effective gas price, total fee in wei, deployed contract
+      address, method id, and every ERC-20 transfer decoded from the receipt
+      logs with contract, symbol, decimals and exact raw amount. A hash that
+      does not exist returns not_found with confidence 0, never a guess. This
+      is a lookup of one specific transaction; for what an address HOLDS use
+      WALLET_BALANCE_CHECK, and for how risky an address is use
+      FRAUD_DETECTION. Params: tx_hash (required, 0x-prefixed followed by
+      exactly 64 hex characters, for example
+      0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431;
+      also accepted as txHash, hash, transaction_hash or transactionHash),
+      chain (optional, one of ethereum, base, polygon, arbitrum, optimism,
+      bsc, avalanche, default ethereum), query (optional, the original
+      natural-language question — the hash and chain are read out of it when
+      tx_hash is not supplied). JSON body:
+      {"tx_hash": "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431",
+      "chain": "ethereum"}.
+
+  - path: /transaction/lookup
+    external_path: /transaction/lookup
+    method: GET
+    description: >
+      ONCHAIN_TX_LOOKUP, identical to the POST form above and taking the same
+      values in the query string instead of a JSON body. Query params: tx_hash
+      (required, 0x-prefixed followed by exactly 64 hex characters; also
+      accepted as hash or txHash), chain (optional, default ethereum), query
+      (optional, natural-language question).
+
+  - path: /wallet/balance
+    external_path: /wallet/balance
+    method: POST
+    content_type: application/json
+    description: >
+      WALLET_BALANCE_CHECK. Answers "how much ETH does
+      0x974caa59e49682cda0ad2bbe82983419a2ecc400 hold", "what is the balance of
+      vitalik.eth", "what does this address hold on polygon", "how much USDT is
+      in this wallet". Takes one blockchain address or ENS name and returns its
+      current native-coin balance in exact base units (native_balance_wei, a
+      decimal string so wei-scale precision survives) and in human units with
+      the asset symbol, the block height the read reflects, and ERC-20 token
+      balances carrying contract, symbol, decimals, raw and scaled amounts. An
+      ENS name is resolved on-chain through the ENS registry; a name with no
+      resolver returns unresolved_name rather than a balance for some other
+      account. A provider that cannot be read returns null with balance_status
+      "unavailable" and confidence 0 — never a zero balance, which is
+      indistinguishable from a genuinely empty wallet. This answers what an
+      address HOLDS; for one transaction's details use ONCHAIN_TX_LOOKUP, and
+      for how risky an address is use FRAUD_DETECTION. Params: address
+      (required, either 0x-prefixed followed by exactly 40 hex characters for
+      example 0x974caa59e49682cda0ad2bbe82983419a2ecc400, or an ENS name
+      ending .eth for example vitalik.eth, or a native solana, tron or bitcoin
+      address; also accepted as wallet, account or ens), chain (optional, one
+      of ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana,
+      tron, bitcoin, default ethereum), query (optional, the original
+      natural-language question — the address and chain are read out of it
+      when address is not supplied). JSON body:
+      {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
+      "chain": "ethereum"}.
+
+  - path: /wallet/balance
+    external_path: /wallet/balance
+    method: GET
+    description: >
+      WALLET_BALANCE_CHECK, identical to the POST form above and taking the
+      same values in the query string instead of a JSON body. Query params:
+      address (required, 0x-prefixed 40 hex characters or an ENS name ending
+      .eth; also accepted as wallet), chain (optional, default ethereum),
+      query (optional, natural-language question).
+
+  - path: /wallet/trace
+    external_path: /wallet/trace
+    method: POST
+    content_type: application/json
+    description: >
+      WALLET_BALANCE_CHECK. The same balance answer as /wallet/balance, under
+      the endpoint's original name, plus a separately labelled attribution
+      layer: which reviewed gambling-operator wallet clusters this address has
+      interacted with in the last 30 days. The balance is the answer and is
+      never delayed by that scan; when the scan does not finish inside its
+      budget the response says association_scan_status
+      "not_completed_in_budget", which means missing coverage and not an
+      observation of zero interactions. Attribution is a reviewed ownership
+      claim about an address, not a statement about a person or about intent.
+      Params: identical to /wallet/balance — address (required, 0x-prefixed 40
+      hex characters or an ENS name ending .eth), chain (optional, default
+      ethereum), query (optional, natural-language question). JSON body:
+      {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
+      "chain": "ethereum"}.
+
+  - path: /anomaly/check
+    external_path: /anomaly/check
+    method: POST
+    content_type: application/json
+    description: >
+      FRAUD_DETECTION. Answers "how likely is
+      0x974caa59e49682cda0ad2bbe82983419a2ecc400 to be fraudulent", "is this
+      address risky", "is it safe to receive funds from this wallet", "does
+      this address show suspicious activity". Assesses how likely a specific
+      on-chain address is to be fraudulent from bounded, observable transfer
+      evidence. Runs five named screens — round-trip return, transfer
+      velocity, counterparty concentration, dust fan-in and repeated identical
+      amounts — and returns risk_tier (one of insufficient_data, low_risk,
+      elevated_risk, high_risk), a bounded deterministic risk_score between 0
+      and 1, is_suspicious, and every screen's measurement whether or not it
+      fired, so a low-risk answer carries the same evidence a high-risk one
+      would. Counterparties that are known exchanges, bridges, DEX routers or
+      reviewed gambling-operator clusters are identified and mitigate the
+      screens ordinary settlement trips by construction, so routine exchange
+      activity is not reported as fraud. An address with too little history to
+      characterise returns insufficient_data, never low_risk. Coverage is
+      on-chain addresses on the listed chains; a question about a named
+      company, brand, scheme or other off-chain entity is outside what this
+      miner can observe and is answered as such with confidence 0 rather than
+      guessed. Nothing here asserts that fraud occurred — the tiers rank review
+      priority from observable transfer patterns and infer no identity or
+      intent. Params: address (required, 0x-prefixed followed by exactly 40 hex
+      characters for example 0x974caa59e49682cda0ad2bbe82983419a2ecc400, or an
+      ENS name ending .eth; also accepted as wallet or account), chain
+      (optional, one of ethereum, base, polygon, arbitrum, optimism, bsc,
+      avalanche, solana, tron, bitcoin, default ethereum), hours (optional,
+      integer between 1 and 720, default 24), query (optional, the original
+      natural-language question — the address, chain and lookback window are
+      read out of it when address is not supplied). JSON body:
+      {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
+      "chain": "ethereum", "hours": 24}.
+
+  - path: /anomaly/check
+    external_path: /anomaly/check
+    method: GET
+    description: >
+      FRAUD_DETECTION, identical to the POST form above and taking the same
+      values in the query string instead of a JSON body. Query params: address
+      (required, 0x-prefixed 40 hex characters or an ENS name ending .eth;
+      also accepted as wallet), chain (optional, default ethereum), hours
+      (optional, 1 to 720, default 24), query (optional, natural-language
+      question).
 
   - path: /casino/stats
     external_path: /casino/stats
     method: POST
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Measures observed inbound and outbound transfer volume, unique inbound
       counterparties, transaction count, chains, and net directional flow around
       a reviewed operator wallet cluster. This is a settlement-rail observation,
@@ -275,6 +429,9 @@ endpoints:
     external_path: /casino/ranking
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Ranks only operators with attributed wallet coverage by observed inbound
       USD transfer flow. Includes tracked-flow share, counterparties, outbound
       flow, and confidence. Catalogued operators without reviewed attribution are
@@ -285,75 +442,13 @@ endpoints:
       "unique_depositors": 3077}], "confidence": 0.9, "verdict": "leader:stake",
       "reasoning": "...", "data_source": "live"}
 
-  - path: /wallet/trace
-    external_path: /wallet/trace
-    method: POST
-    description: >
-      Direct balance facts for one address, plus a separately labelled
-      attribution layer. The balance is the answer: exact native balance in base
-      units (native_balance_wei, a string to preserve precision) and in human
-      units, the native asset symbol, the block the read reflects, and ERC-20
-      token balances with contract, symbol, decimals, and both raw and scaled
-      amounts. A provider failure returns null with balance_status
-      "unavailable" and confidence 0 — never a zero balance, which is
-      indistinguishable from a genuinely empty wallet and is wrong. Registry
-      attribution and the 30-day operator-interaction scan are derived context,
-      run on their own budget, and never delay or displace the balance; when the
-      scan does not finish it reports association_scan_status
-      "not_completed_in_budget", which is missing coverage, not an observation of
-      zero interactions. Attribution is a reviewed ownership claim about an
-      address; an address is not a person and an interaction does not establish
-      gambling intent. Also served at /wallet/balance.
-      REQUEST: {"address": "0x974caa...c400", "chain": "ethereum"}
-      RESPONSE: {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
-      "chain": "ethereum", "block_number": 25832082, "native_symbol": "ETH",
-      "native_balance_wei": "1431585373632929230863",
-      "native_balance": 1431.5853736329292, "token_balances": [{"contract":
-      "0xdac17f958d2ee523a2206206994597c13d831ec7", "symbol": "USDT",
-      "decimals": 6, "raw_balance": "1500000", "balance": 1.5}],
-      "token_count": 1, "balance_status": "observed", "labeled_casino": "stake",
-      "associations": [{"casino_slug": "stake", "interactions_30d": 6482,
-      "cluster_confidence": 0.75}], "association_scan_status": "complete",
-      "confidence": 0.75, "verdict": "stake", "reasoning": "...",
-      "data_source": "live"}
-
-  - path: /anomaly/check
-    external_path: /anomaly/check
-    method: POST
-    description: >
-      Deterministic risk triage for one address. Runs five named screens —
-      round-trip return, transfer velocity, counterparty concentration, dust
-      fan-in, and repeated identical amounts — and reports each screen's
-      MEASUREMENT whether or not it fired, so a low-risk answer is backed by the
-      same numbers a high-risk one would be. Known exchange, bridge, DEX-router
-      and attributed-operator counterparties are identified and mitigate the
-      screens that ordinary settlement trips by construction; round trips with
-      them are excluded from the score and reported separately. risk_tier is the
-      canonical label and is one of insufficient_data, low_risk, elevated_risk,
-      high_risk. An address with too few transfers to characterise is
-      insufficient_data, never low_risk — unmeasured coverage is not a clean
-      result. This is review prioritization from observable transfer patterns; it
-      is never a finding of fraud, an identity decision, or an enforcement result,
-      and no tier asserts that an offence occurred.
-      REQUEST: {"address": "0x974caa...c400", "chain": "ethereum", "hours": 24}
-      RESPONSE: {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
-      "chain": "ethereum", "window_hours": 24, "risk_tier": "low_risk",
-      "risk_score": 0.0, "is_suspicious": false, "verdict": "normal",
-      "risk_signals": [{"name": "round_trip_return", "severity": "info",
-      "score": 0.0, "measurement": "0 of 332 outbound transfers returned...",
-      "evidence": []}], "signals_fired": [], "screens_run": 5,
-      "transfers_analyzed": 1231, "inbound_transfers": 899,
-      "outbound_transfers": 332, "distinct_counterparties": 831,
-      "top_counterparty_share_pct": 31.2, "round_trip_count": 0,
-      "peak_hourly_transfers": 96, "mean_hourly_transfers": 55.83,
-      "infrastructure_counterparties": [{"address": "0x28c6...", "label":
-      "Binance 14", "category": "exchange"}], "coverage_complete": true,
-      "confidence": 0.85, "reasoning": "...", "data_source": "live"}
-
   - path: /casinos
     external_path: /casinos
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Public registry of catalogued gambling operators, reviewed wallet claims,
       evidence status, supported chains, and explicit attributed versus unobserved
       coverage. This is the discovery endpoint for understanding what other
@@ -366,6 +461,9 @@ endpoints:
     external_path: /market/networks
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Observed flow split by chain across attributed operator clusters.
       REQUEST: query param ?hours=168
       RESPONSE: {"window_hours": 168, "chains": [{"chain": "ethereum",
@@ -378,6 +476,9 @@ endpoints:
     external_path: /market/assets
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Asset composition of observed flow. Optional ?slug= scopes it to one
       operator. Reports stablecoin share, a genuine behavioural signal.
       REQUEST: query params ?hours=168&slug=stake
@@ -390,10 +491,13 @@ endpoints:
     external_path: /market/large-transfers
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Individual transfers above a USD threshold touching an attributed
       cluster. Each row is one verifiable transaction hash.
       REQUEST: query params ?hours=24&min_usd=100000&limit=50
-      RESPONSE: {"count": 6, "transfers": [{"tx_hash": "0xb93d31...",
+      RESPONSE: {"count": 6, "transfers": [{"tx_hash": "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431",
       "chain": "ethereum", "operator_slug": "rollbit", "direction": "inbound",
       "token": "USDC", "usd_value": 600001.0, "timestamp": "..."}],
       "confidence": 0.55, "verdict": "6_transfers_above_threshold",
@@ -403,6 +507,9 @@ endpoints:
     external_path: /operator/{slug}/series
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Bucketed inbound/outbound flow series for one operator. Unattributed
       operators return verdict "not_attributed" with confidence 0 — explicitly
       unobserved rather than zero.
@@ -416,12 +523,15 @@ endpoints:
     external_path: /operator/{slug}/counterparties
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Counterparty concentration for an operator. High top-10 share indicates
       routing or bridge activity rather than broad user behaviour.
       REQUEST: path slug, query params ?hours=168&top=20
       RESPONSE: {"slug": "stake", "distinct_counterparties": 719,
       "top10_share_of_observed_flow_pct": 77.03, "counterparties":
-      [{"address": "0x6f53...", "total_usd": 425999.0,
+      [{"address": "0xdfd5293d8e347dfe59e90efd55b2956a1343963d", "total_usd": 425999.0,
       "share_of_observed_flow_pct": 30.52}], "confidence": 0.55,
       "reasoning": "...", "data_source": "live"}
 
@@ -429,6 +539,9 @@ endpoints:
     external_path: /coverage
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       What the miner can and cannot see. Distinguishes attributed operators
       (produce figures) from catalogued-but-unobserved ones (produce nothing,
       never a zero). Consumers should weight all other figures through this.
@@ -441,6 +554,9 @@ endpoints:
     external_path: /player/evaluate
     method: POST
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Evaluate one address against every attributed operator cluster. Returns
       value sent to and received from operators, net position, per-operator
       exposure, and a behavioural classification (individual_candidate,
@@ -448,8 +564,8 @@ endpoints:
       Net position is settlement direction, NOT gambling profit and loss —
       balances held inside an operator are invisible and non-wager flows such as
       affiliate payouts are indistinguishable from winnings.
-      REQUEST: {"address": "0x...", "chain": "ethereum", "hours": 720}
-      RESPONSE: {"address": "0x...", "sent_to_operators_usd": 316881.0,
+      REQUEST: {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400", "chain": "ethereum", "hours": 720}
+      RESPONSE: {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400", "sent_to_operators_usd": 316881.0,
       "received_from_operators_usd": 316879.0, "net_position_usd": -2.0,
       "transfers_with_operators": 3, "operators_touched": 1, "exposures": [...],
       "entity_class": "individual_candidate", "behaviour_flags": [...],
@@ -460,6 +576,9 @@ endpoints:
     external_path: /players/leaderboard
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Counterparties ranked by net observed position across attributed operator
       clusters, derived from settlement rather than scraped bet feeds. Only
       addresses showing bidirectional flow are ranked; one-directional and
@@ -475,6 +594,9 @@ endpoints:
     external_path: /attribution/discover/{slug}
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Propose candidate sibling wallets for an already-attributed operator,
       ranked by on-chain evidence (bidirectional cluster flow, counterparty
       overlap, hub shape, transfer cadence). Returns a REVIEW QUEUE — behaviour
@@ -482,7 +604,7 @@ endpoints:
       added to the registry automatically.
       REQUEST: path slug, query params ?hours=720&limit=10
       RESPONSE: {"slug": "stake", "counterparties_examined": 3326,
-      "candidates": [{"address": "0x...", "strength": 0.45,
+      "candidates": [{"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400", "strength": 0.45,
       "recommended_status": "unverified_seed", "review_required": true,
       "evidence": {...}, "signals": [...]}], "confidence": 0.6,
       "verdict": "6_candidates_0_strong", "reasoning": "...",
@@ -492,6 +614,9 @@ endpoints:
     external_path: /attribution/discover
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Run candidate discovery across every attributed operator at once.
       REQUEST: query params ?hours=720&per_operator=5
       RESPONSE: {"operators_expanded": 5, "candidates_proposed": 24,
@@ -502,6 +627,9 @@ endpoints:
     external_path: /operator/{slug}/treasury
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Current on-chain holdings across an operator's attributed clusters —
       native balance plus ERC20 token balances, priced to USD with an asset
       breakdown. Balances, not flow. NOT a solvency statement: player
@@ -517,6 +645,9 @@ endpoints:
     external_path: /market/treasury
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       All attributed operators ranked by observed on-chain reserves, with
       stablecoin share and share of observed reserves.
       REQUEST: no parameters
@@ -529,6 +660,9 @@ endpoints:
     external_path: /market/providers
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Infrastructure providers ranked by casino flow carried, with rising and
       falling trend versus the prior equal window. These are the bridges,
       exchange hot wallets, and routing contracts that move value in and out of
@@ -536,7 +670,7 @@ endpoints:
       operator's ledger and leaves no on-chain record attributing it to a game
       studio, so game-provider ranking is not derivable from chain data.
       REQUEST: query params ?hours=168&limit=25
-      RESPONSE: {"ranked": [{"address": "0x...", "label": "Binance 14",
+      RESPONSE: {"ranked": [{"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400", "label": "Binance 14",
       "category": "exchange", "flow_usd": 22816040.0, "trend": "falling",
       "change_pct": -18.2, "operators_served": 1,
       "share_of_rail_flow_pct": 59.99}], "trending": [...], "categories": [...],
@@ -546,6 +680,9 @@ endpoints:
     external_path: /players/cohorts
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Value segments, new-versus-returning retention, and flow concentration
       across every observed counterparty. Broader than the net-position board:
       it covers all addresses, not only those with a round trip.
@@ -559,6 +696,9 @@ endpoints:
     external_path: /players/overlap
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Addresses transacting with more than one attributed operator — a shared
       audience signal. Overlap is a floor, not a customer count: one person may
       use several addresses.
@@ -572,6 +712,9 @@ endpoints:
     external_path: /health/registry
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Health of every attributed operator's wallet claims. Distinguishes an
       address that is genuinely quiet in the window from one that is dormant,
       and from one that has NO transfer history at all — a wrong label rather
@@ -587,12 +730,15 @@ endpoints:
     external_path: /health/operator/{slug}
     method: GET
     description: >
+      Product and catalog endpoint for the DegenLens application, NOT an
+      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
+      FRAUD_DETECTION here.
       Wallet-claim health for one operator, per address: lifetime activity,
       last-seen timestamp, and a status of active, quiet, dormant, or dead.
       REQUEST: path slug, query param ?hours=168
       RESPONSE: {"slug": "stake", "attribution_status": "partial",
       "coverage_quality": "partial", "active_claims": 1, "total_claims": 1,
-      "reportable": true, "wallets": [{"address": "0x...", "status": "active",
+      "reportable": true, "wallets": [{"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400", "status": "active",
       "lifetime_transfers": 200, "days_since_activity": 0.01}],
       "confidence": 0.9, "data_source": "live"}
 

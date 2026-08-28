@@ -77,11 +77,11 @@ to win.
 
 Live network counts when this was written:
 
-| Intent | Miners before us | With DegenMiner | Position |
-|---|---|---|---|
-| `ONCHAIN_TX_LOOKUP` | 2 | **3** | Hits eligibility exactly; 2 rivals to beat |
-| `FRAUD_DETECTION` | 2 | **3** | Hits eligibility exactly; 2 rivals to beat |
-| `WALLET_BALANCE_CHECK` | 0 | **1** | Uncontested, not yet prize-eligible |
+| Intent                 | Miners before us | With DegenMiner | Position                                   |
+| ---------------------- | ---------------- | --------------- | ------------------------------------------ |
+| `ONCHAIN_TX_LOOKUP`    | 2                | **3**           | Hits eligibility exactly; 2 rivals to beat |
+| `FRAUD_DETECTION`      | 2                | **3**           | Hits eligibility exactly; 2 rivals to beat |
+| `WALLET_BALANCE_CHECK` | 0                | **1**           | Uncontested, not yet prize-eligible        |
 
 Re-check before registering — the set moves:
 
@@ -99,15 +99,15 @@ to cover.
 
 ## What DegenMiner serves
 
-| Method | Path | Intent | Returns |
-|---|---|---|---|
-| POST | `/casino/stats` | `ONCHAIN_TX_LOOKUP` | Deposits, withdrawals, net flow, unique depositors |
-| GET | `/casino/ranking` | `ONCHAIN_TX_LOOKUP` | Casinos ranked by observed USD volume + market share |
-| POST | `/wallet/trace` | `WALLET_BALANCE_CHECK` | Native balance + casino cluster attribution |
-| POST | `/anomaly/check` | `FRAUD_DETECTION` | Wash-trade / velocity / sybil screening with evidence |
-| GET | `/casinos` | — | Tracked casino registry |
-| GET | `/health` | — | Liveness, readiness, circuit breaker state |
-| GET | `/metrics` | — | Uptime, latency percentiles, error rate, cache hit rate |
+| Method | Path              | Intent                 | Returns                                                 |
+| ------ | ----------------- | ---------------------- | ------------------------------------------------------- |
+| POST   | `/casino/stats`   | `ONCHAIN_TX_LOOKUP`    | Deposits, withdrawals, net flow, unique depositors      |
+| GET    | `/casino/ranking` | `ONCHAIN_TX_LOOKUP`    | Casinos ranked by observed USD volume + market share    |
+| POST   | `/wallet/trace`   | `WALLET_BALANCE_CHECK` | Native balance + casino cluster attribution             |
+| POST   | `/anomaly/check`  | `FRAUD_DETECTION`      | Wash-trade / velocity / sybil screening with evidence   |
+| GET    | `/casinos`        | —                      | Tracked casino registry                                 |
+| GET    | `/health`         | —                      | Liveness, readiness, circuit breaker state              |
+| GET    | `/metrics`        | —                      | Uptime, latency percentiles, error rate, cache hit rate |
 
 Every response carries the three fields the YAML's `signal_mapping` declares —
 `confidence`, `verdict`, `reasoning` — plus `data_source`.

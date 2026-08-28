@@ -1,7 +1,18 @@
+# OS and local environment
 .DS_Store
+Thumbs.db
+*.seed
+*.pid
+
+# Environment files and local secrets
 .env
 .env.*
 !.env.example
+!.env.*.example
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
 
 # Credentials and private key material
 *.pem
@@ -13,6 +24,8 @@
 *.der
 *.cer
 *.crt
+*.wallet
+*.mnemonic
 id_rsa
 id_rsa.*
 id_ed25519
@@ -24,33 +37,62 @@ secrets.json
 secrets.yaml
 secrets.yml
 secrets.env
+secret.*
+secrets.*
 .npmrc
 .pypirc
 .netrc
 
-# Local configuration and agent state
+# Local tool configuration and deployment state
 .claude/*.local.json
 .opencode/
 .idea/
 .vscode/
+.vercel/
+.railway/
 
+# Logs, reports, dumps, and local scratch data
+*.log
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.flv
+*.wmv
+*.m4v
+*.log.*
+*.dump
+*.sql.gz
+coverage/
+.coverage
+htmlcov/
+.scratchpad/
+
+# JavaScript / TypeScript
 node_modules/
 dist/
 .next/
 *.tsbuildinfo
-target/
-*.log
-.scratchpad/
+.turbo/
+.cache/
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.so
 .venv/
 venv/
+ENV/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Rust
-Cargo.lock
+target/
 
 # pnpm
 .pnpm-store/
+
+# Rust library lockfiles are generated locally for this workspace.
+Cargo.lock

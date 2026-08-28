@@ -1,0 +1,22 @@
+{
+  "name": "video",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts DegenLensExplainer out/degenlens-explainer.mp4 --codec=h264 --image-format=png --crf=15 --color-space=bt709 --muted --concurrency=50%",
+    "render:4k": "remotion render src/index.ts DegenLensExplainer out/degenlens-explainer-4k.mp4 --codec=h264 --scale=2 --image-format=png --crf=15 --color-space=bt709 --muted --concurrency=50%",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.517",
+    "@remotion/google-fonts": "4.0.517",
+    "remotion": "4.0.517",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.5.4"
+  }
+}

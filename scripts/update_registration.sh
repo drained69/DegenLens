@@ -27,7 +27,15 @@ local_hash="$(shasum -a 256 "$LOCAL" | awk '{print $1}')"
 say "   served sha256 : $served_hash"
 say "   local  sha256 : $local_hash"
 if [ "$served_hash" != "$local_hash" ]; then
-  fail "the deployment is still serving an older manifest — wait for the deploy to finish, then re-run"
+  say ""
+  say "   The URL is serving a different manifest than $LOCAL."
+  say "   Two causes, both worth waiting out before spending gas:"
+  say "     - the deploy has not finished yet;"
+  say "     - the route sets 'Cache-Control: max-age=300', so a proxy can hold"
+  say "       the previous manifest for up to 5 minutes. The node fetches this"
+  say "       URL the same way, so the hash must be of what it will actually"
+  say "       receive — do NOT cache-bust to force a match."
+  fail "re-run in a minute; commit the manifest only once these two hashes agree"
 fi
 say "   OK: the deployment is serving exactly the manifest in $LOCAL"
 

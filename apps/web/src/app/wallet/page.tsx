@@ -159,11 +159,16 @@ export default function WalletPage() {
               <>
                 <div className="mb-4 grid grid-cols-2 gap-3">
                   <Stat
-                    label="Verdict"
-                    value={anomaly.data.verdict}
-                    positive={anomaly.data.verdict === 'normal'}
+                    label="Risk"
+                    value={anomaly.data.risk_tier ?? anomaly.data.verdict}
+                    positive={!anomaly.data.is_suspicious}
                   />
-                  <Stat label="Score" value={(anomaly.data.score * 100).toFixed(0) + '%'} />
+                  <Stat
+                    label="Score"
+                    value={
+                      ((anomaly.data.risk_score ?? anomaly.data.score ?? 0) * 100).toFixed(0) + '%'
+                    }
+                  />
                 </div>
                 {anomaly.data.signals.length === 0 ? (
                   <p className="text-sm text-slate-500">no anomalies detected</p>

@@ -14,8 +14,19 @@ export const CasinoSchema = z.object({
   wallets: z.array(z.object({
     address: z.string(),
     chain: z.string(),
-    role: z.enum(['deposit', 'hot', 'cold', 'treasury']),
+    // 'consolidation' and 'unknown' mirror what the upstream cluster registry
+    // distinguishes. A consolidation address moves funds between an operator's
+    // own wallets and an unknown one has not been classified; neither is a
+    // player-facing hot wallet.
+    role: z.enum([
+      'deposit', 'hot', 'cold', 'treasury', 'consolidation', 'unknown',
+    ]),
+    /** The source's human label for this cluster, when it publishes one. */
+    label: z.string().nullish(),
+    /** Capped by our provenance ceiling — see source_confidence. */
     confidence: z.number(),
+    /** The source's own confidence, before our ceiling is applied. */
+    source_confidence: z.number().nullish(),
     evidence_status: z.enum(['verified', 'curated', 'unverified_seed']),
     evidence: z.array(z.string()),
     source: z.string().optional(),
@@ -143,12 +154,44 @@ export type WalletTrace = z.infer<typeof WalletTraceSchema>;
 export const AnomalyReportSchema = z.object({
   address: z.string(),
   chain: z.string(),
+  // Legacy label, retained so existing views keep working. `risk_tier` is the
+  // canonical finding; these map one-to-one.
   verdict: z.enum(['normal', 'suspicious', 'critical', 'unavailable']),
-  score: z.number(),
+  risk_tier: z
+    .enum(['insufficient_data', 'low_risk', 'elevated_risk', 'high_risk'])
+    .optional(),
+  score: z.number().optional(),
+  risk_score: z.number().optional(),
   signals: z.array(z.string()),
   signal_count: z.number().int(),
   is_suspicious: z.boolean().optional(),
+  /** Per-screen detail: every screen reports a measurement, fired or not. */
+  risk_signals: z
+    .array(
+      z.object({
+        name: z.string(),
+        severity: z.enum(['info', 'low', 'medium', 'high']),
+        score: z.number(),
+        measurement: z.string(),
+        evidence: z.array(z.string()).default([]),
+      }),
+    )
+    .optional(),
+  signals_fired: z.array(z.string()).optional(),
+  screens_run: z.number().int().optional(),
   transfers_analyzed: z.number().int().optional(),
+  inbound_transfers: z.number().int().optional(),
+  outbound_transfers: z.number().int().optional(),
+  distinct_counterparties: z.number().int().optional(),
+  top_counterparty_share_pct: z.number().optional(),
+  top5_counterparty_share_pct: z.number().optional(),
+  round_trip_count: z.number().int().optional(),
+  peak_hourly_transfers: z.number().int().optional(),
+  mean_hourly_transfers: z.number().optional(),
+  infrastructure_counterparties: z
+    .array(z.object({ address: z.string(), label: z.string(), category: z.string() }))
+    .optional(),
+  coverage_complete: z.boolean().optional(),
   window_hours: z.number().int().optional(),
   confidence: z.number(),
   reasoning: z.string(),

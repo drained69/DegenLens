@@ -304,28 +304,6 @@ endpoints:
             intents: ["*"]
             description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche. Defaults to ethereum when absent."
             example: "ethereum"
-            accepted_fields:
-              - value: ethereum
-                intents: ["*"]
-                description: "Ethereum mainnet."
-              - value: base
-                intents: ["*"]
-                description: "Base mainnet."
-              - value: polygon
-                intents: ["*"]
-                description: "Polygon PoS mainnet."
-              - value: arbitrum
-                intents: ["*"]
-                description: "Arbitrum One."
-              - value: optimism
-                intents: ["*"]
-                description: "OP Mainnet."
-              - value: bsc
-                intents: ["*"]
-                description: "BNB Smart Chain."
-              - value: avalanche
-                intents: ["*"]
-                description: "Avalanche C-Chain."
           - name: query
             type: string
             intents: ["*"]
@@ -357,28 +335,6 @@ endpoints:
             intents: ["*"]
             description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche. Defaults to ethereum when absent."
             example: "ethereum"
-            accepted_fields:
-              - value: ethereum
-                intents: ["*"]
-                description: "Ethereum mainnet."
-              - value: base
-                intents: ["*"]
-                description: "Base mainnet."
-              - value: polygon
-                intents: ["*"]
-                description: "Polygon PoS mainnet."
-              - value: arbitrum
-                intents: ["*"]
-                description: "Arbitrum One."
-              - value: optimism
-                intents: ["*"]
-                description: "OP Mainnet."
-              - value: bsc
-                intents: ["*"]
-                description: "BNB Smart Chain."
-              - value: avalanche
-                intents: ["*"]
-                description: "Avalanche C-Chain."
           - name: query
             type: string
             intents: ["*"]
@@ -431,37 +387,6 @@ endpoints:
             intents: ["*"]
             description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
             example: "ethereum"
-            accepted_fields:
-              - value: ethereum
-                intents: ["*"]
-                description: "Ethereum mainnet."
-              - value: base
-                intents: ["*"]
-                description: "Base mainnet."
-              - value: polygon
-                intents: ["*"]
-                description: "Polygon PoS mainnet."
-              - value: arbitrum
-                intents: ["*"]
-                description: "Arbitrum One."
-              - value: optimism
-                intents: ["*"]
-                description: "OP Mainnet."
-              - value: bsc
-                intents: ["*"]
-                description: "BNB Smart Chain."
-              - value: avalanche
-                intents: ["*"]
-                description: "Avalanche C-Chain."
-              - value: solana
-                intents: ["*"]
-                description: "Solana mainnet-beta."
-              - value: tron
-                intents: ["*"]
-                description: "Tron mainnet."
-              - value: bitcoin
-                intents: ["*"]
-                description: "Bitcoin mainnet."
           - name: query
             type: string
             intents: ["*"]
@@ -493,37 +418,6 @@ endpoints:
             intents: ["*"]
             description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
             example: "ethereum"
-            accepted_fields:
-              - value: ethereum
-                intents: ["*"]
-                description: "Ethereum mainnet."
-              - value: base
-                intents: ["*"]
-                description: "Base mainnet."
-              - value: polygon
-                intents: ["*"]
-                description: "Polygon PoS mainnet."
-              - value: arbitrum
-                intents: ["*"]
-                description: "Arbitrum One."
-              - value: optimism
-                intents: ["*"]
-                description: "OP Mainnet."
-              - value: bsc
-                intents: ["*"]
-                description: "BNB Smart Chain."
-              - value: avalanche
-                intents: ["*"]
-                description: "Avalanche C-Chain."
-              - value: solana
-                intents: ["*"]
-                description: "Solana mainnet-beta."
-              - value: tron
-                intents: ["*"]
-                description: "Tron mainnet."
-              - value: bitcoin
-                intents: ["*"]
-                description: "Bitcoin mainnet."
           - name: query
             type: string
             intents: ["*"]
@@ -565,37 +459,6 @@ endpoints:
             intents: ["*"]
             description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
             example: "ethereum"
-            accepted_fields:
-              - value: ethereum
-                intents: ["*"]
-                description: "Ethereum mainnet."
-              - value: base
-                intents: ["*"]
-                description: "Base mainnet."
-              - value: polygon
-                intents: ["*"]
-                description: "Polygon PoS mainnet."
-              - value: arbitrum
-                intents: ["*"]
-                description: "Arbitrum One."
-              - value: optimism
-                intents: ["*"]
-                description: "OP Mainnet."
-              - value: bsc
-                intents: ["*"]
-                description: "BNB Smart Chain."
-              - value: avalanche
-                intents: ["*"]
-                description: "Avalanche C-Chain."
-              - value: solana
-                intents: ["*"]
-                description: "Solana mainnet-beta."
-              - value: tron
-                intents: ["*"]
-                description: "Tron mainnet."
-              - value: bitcoin
-                intents: ["*"]
-                description: "Bitcoin mainnet."
           - name: query
             type: string
             intents: ["*"]
@@ -664,37 +527,6 @@ endpoints:
             intents: ["*"]
             description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
             example: "ethereum"
-            accepted_fields:
-              - value: ethereum
-                intents: ["*"]
-                description: "Ethereum mainnet."
-              - value: base
-                intents: ["*"]
-                description: "Base mainnet."
-              - value: polygon
-                intents: ["*"]
-                description: "Polygon PoS mainnet."
-              - value: arbitrum
-                intents: ["*"]
-                description: "Arbitrum One."
-              - value: optimism
-                intents: ["*"]
-                description: "OP Mainnet."
-              - value: bsc
-                intents: ["*"]
-                description: "BNB Smart Chain."
-              - value: avalanche
-                intents: ["*"]
-                description: "Avalanche C-Chain."
-              - value: solana
-                intents: ["*"]
-                description: "Solana mainnet-beta."
-              - value: tron
-                intents: ["*"]
-                description: "Tron mainnet."
-              - value: bitcoin
-                intents: ["*"]
-                description: "Bitcoin mainnet."
           - name: hours
             type: integer
             intents: ["*"]
@@ -737,37 +569,6 @@ endpoints:
             intents: ["*"]
             description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
             example: "ethereum"
-            accepted_fields:
-              - value: ethereum
-                intents: ["*"]
-                description: "Ethereum mainnet."
-              - value: base
-                intents: ["*"]
-                description: "Base mainnet."
-              - value: polygon
-                intents: ["*"]
-                description: "Polygon PoS mainnet."
-              - value: arbitrum
-                intents: ["*"]
-                description: "Arbitrum One."
-              - value: optimism
-                intents: ["*"]
-                description: "OP Mainnet."
-              - value: bsc
-                intents: ["*"]
-                description: "BNB Smart Chain."
-              - value: avalanche
-                intents: ["*"]
-                description: "Avalanche C-Chain."
-              - value: solana
-                intents: ["*"]
-                description: "Solana mainnet-beta."
-              - value: tron
-                intents: ["*"]
-                description: "Tron mainnet."
-              - value: bitcoin
-                intents: ["*"]
-                description: "Bitcoin mainnet."
           - name: hours
             type: integer
             intents: ["*"]

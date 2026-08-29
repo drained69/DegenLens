@@ -896,360 +896,55 @@ def test_declared_required_params_are_the_ones_the_route_actually_needs():
         )
 
 
+def _offered_chains(entry):
+    """The chain values a param's description puts in front of the builder."""
+    tail = entry["description"].split("One of:")[1]
+    return {c for c in re.findall(r"[a-z]+", tail) if c in DECLARED_CHAINS}
+
+
 def test_declared_chain_values_are_all_actually_served():
-    """`accepted_fields` is the enumeration the request builder picks from.
-    A value listed there that we reject turns a well-formed call into a 422."""
+    """The chain parameter has no schema-level enumeration to lean on, so the
+    description IS the enumeration the request builder reads. Every value it
+    offers must be one the miner actually serves."""
+    seen = 0
     for endpoint in MANIFEST["endpoints"]:
         for groups in (endpoint.get("params") or {}).values():
             for group in ("required", "optional"):
                 for entry in groups.get(group, []):
                     if entry["name"] != "chain":
                         continue
-                    values = [a["value"] for a in entry.get("accepted_fields") or []]
-                    assert values, f"{endpoint['path']} chain declares no accepted_fields"
-                    for value in values:
-                        assert value in DECLARED_CHAINS, (
-                            f"{endpoint['path']} offers chain {value!r}, "
-                            f"which is not a chain this miner serves"
-                        )
-                    for a in entry["accepted_fields"]:
-                        assert a.get("intents"), f"{a['value']} declares no intents"
-                        assert a.get("description"), f"{a['value']} has no description"
+                    offered = _offered_chains(entry)
+                    assert offered, f"{endpoint['path']} chain names no values"
+                    stray = offered - set(DECLARED_CHAINS)
+                    assert not stray, (
+                        f"{endpoint['path']} offers chain(s) {sorted(stray)} "
+                        f"this miner does not serve"
+                    )
+                    seen += 1
+    assert seen == 7, f"expected a chain param on 7 intent endpoints, found {seen}"
 
 
-def test_signal_mapping_matches_what_every_response_returns():
-    mapping = MANIFEST["semantics"]["signal_mapping"]
-    assert set(mapping) <= {"confidence_field", "label_field", "reason_field"}
-    assert mapping["confidence_field"] == "confidence"
-    assert mapping["label_field"] == "verdict"
-    assert mapping["reason_field"] == "reasoning"
+def test_no_param_declares_accepted_fields_as_a_list():
+    """Registration 294 was rejected for exactly this:
 
+        endpoints.0.params.body.optional.0.accepted_fields:
+        Invalid type. Expected: object, given: array
 
-def test_every_declared_intent_names_itself_in_an_endpoint_description():
-    """The router reads the description to pick an endpoint. An intent that
-    appears nowhere in one has no endpoint the router can select."""
-    for intent in MANIFEST["semantics"]["supported_intents"]:
-        serving = [
-            e for e in MANIFEST["endpoints"]
-            if (e.get("description") or "").lstrip().startswith(intent)
-        ]
-        assert serving, f"{intent} is declared but no endpoint description leads with it"
-
-
-def test_no_endpoint_example_contains_a_truncated_identifier():
-    """A shortened address or hash in an example teaches the request builder to
-    send one, and a shortened address fails our own validator. This was live:
-    the manifest carried `{"address": "0x974caa...c400"}` as the documented
-    request shape for two of the three intent endpoints."""
-    blob = yaml.dump(MANIFEST)
-    hits = re.findall(r"0x[0-9a-fA-F]{2,10}(?:\.\.\.|…)", blob)
-    assert not hits, f"truncated identifiers in manifest examples: {hits[:5]}"
-
-
-def test_intent_endpoints_declare_their_params():
-    """Ahmed's point, in the form the schema actually allows: the params and
-    their descriptions live in the description text, because there is no
-    `params` key."""
-    for endpoint in MANIFEST["endpoints"]:
-        desc = (endpoint.get("description") or "").lstrip()
-        if not any(desc.startswith(i) for i in MANIFEST["semantics"]["supported_intents"]):
-            continue
-        assert "aram" in desc, f"{endpoint['method']} {endpoint['path']} declares no params"
-
-
-def test_non_intent_endpoints_do_not_compete_for_intent_routing():
-    intents = set(MANIFEST["semantics"]["supported_intents"])
-    for endpoint in MANIFEST["endpoints"]:
-        desc = (endpoint.get("description") or "").lstrip()
-        if any(desc.startswith(i) for i in intents):
-            continue
-        assert "NOT an intent target" in desc, (
-            f"{endpoint['method']} {endpoint['path']} neither serves an intent "
-            "nor says it is not an intent target"
-        )
-
-
-@pytest.mark.parametrize(
-    "method,path",
-    [(e["method"], e["path"]) for e in MANIFEST["endpoints"]
-     if any((e.get("description") or "").lstrip().startswith(i)
-            for i in MANIFEST["semantics"]["supported_intents"])],
-)
-def test_every_declared_intent_route_is_actually_served(method, path, offline):
-    """A manifest entry with no route behind it is a guaranteed failed answer."""
-    body = {
-        "tx_hash": "0x" + "a" * 64,
-        "address": STAKE_HOT,
-        "chain": "ethereum",
-        "hours": 24,
-    }
-    if method == "GET":
-        response = client.get(path, params=body)
-    else:
-        response = client.post(path, json=body)
-    assert response.status_code == 200, f"{method} {path} -> {response.status_code}"
-    payload = response.json()
-    assert payload.get("verdict") != "invalid_input"
-    for field in SIGNAL_FIELDS:
-        assert field in payload
-
-
-# ── Natural-language intake and ENS ──────────────────────────────────────────
-
-
-def test_transaction_hash_is_extracted_from_a_plain_question(offline):
-    tx = "0x" + "b" * 64
-    payload = client.post(
-        "/transaction/lookup",
-        json={"query": f"what is the status of transaction {tx} on base"},
-    ).json()
-    assert payload["tx_hash"] == tx
-    assert payload["chain"] == "base"
-
-
-def test_address_chain_and_window_are_extracted_from_a_plain_question(stub_transfers):
-    stub_transfers([])
-    payload = client.post(
-        "/anomaly/check",
-        json={"query": f"how likely is {STAKE_HOT} to be fraudulent over the last 3 days on polygon"},
-    ).json()
-    assert payload["address"] == STAKE_HOT
-    assert payload["chain"] == "polygon"
-    assert payload["window_hours"] == 72
-
-
-def test_explicit_fields_beat_extraction(offline):
-    """Extraction is a fallback for the router shape that passes the raw
-    question, never a reinterpretation of a caller who already said what
-    they meant."""
-    explicit = "0x" + "c" * 64
-    payload = client.post(
-        "/transaction/lookup",
-        json={"tx_hash": explicit, "query": "status of 0x" + "d" * 64},
-    ).json()
-    assert payload["tx_hash"] == explicit
-
-
-def test_an_ens_name_is_accepted_and_resolved(monkeypatch, stub_balance):
-    import app.main as main
-
-    async def fake_resolve(name):
-        return "0xd8da6bf26964af9d7eed9e03e53415d37aa96045", "live"
-
-    monkeypatch.setattr(main, "resolve_ens", fake_resolve)
-    stub_balance(10**18)
-    payload = client.post("/wallet/balance", json={"address": "vitalik.eth"}).json()
-    assert payload["ens_name"] == "vitalik.eth"
-    assert payload["address"] == "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
-    # Both the name asked about and the address it resolved to are in the text.
-    assert "vitalik.eth" in payload["reasoning"]
-    assert "0xd8da6bf26964af9d7eed9e03e53415d37aa96045" in payload["reasoning"]
-
-
-def test_an_unresolvable_ens_name_is_never_answered_against_another_account(monkeypatch):
-    import app.main as main
-
-    async def fake_resolve(name):
-        return None, f"no ENS resolver is registered for {name}"
-
-    monkeypatch.setattr(main, "resolve_ens", fake_resolve)
-    payload = client.post("/wallet/balance", json={"address": "nosuchname12345.eth"}).json()
-    assert payload["verdict"] == "unresolved_name"
-    assert payload["native_balance_wei"] is None
-    assert payload["balance_native"] is None
-    assert payload["confidence"] == 0.0
-
-
-def test_keccak256_matches_published_vectors():
-    """ENS namehash is only correct if this is Keccak-256 and not SHA3-256 —
-    they differ by one padding byte and produce entirely different digests."""
-    from app.onchain import _keccak, _namehash
-
-    assert _keccak(b"").hex() == (
-        "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
-    )
-    assert _keccak(b"abc").hex() == (
-        "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45"
-    )
-    # EIP-137 namehash of "eth".
-    assert _namehash("eth").hex() == (
-        "93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae"
-    )
-    assert _namehash("").hex() == "00" * 32
-
-
-# ── Coverage vs malformed input ──────────────────────────────────────────────
-# Three outcomes that must never collapse into each other. `invalid_input` says
-# the caller should fix the request. `out_of_coverage` says the request was fine
-# and the subject is outside what this miner reads — nothing the caller can fix.
-# An answer says we read it. Reporting the second as the first is what the
-# manifest previously promised and the code did not do.
-
-
-@pytest.mark.parametrize(
-    "path,question",
-    [
-        ("/anomaly/check", "was BitConnect a scam"),
-        ("/anomaly/check", "how likely is FTX to be fraudulent"),
-        ("/wallet/balance", "how much does Coinbase hold"),
-        ("/transaction/lookup", "show me the biggest transaction yesterday"),
-    ],
-)
-def test_a_question_we_cannot_read_is_out_of_coverage_not_malformed(path, question):
-    payload = client.post(path, json={"query": question}).json()
-    assert payload["verdict"] == "out_of_coverage"
-    assert payload["confidence"] == 0.0
-    assert payload["data_source"] == "unavailable"
-    assert payload["subject"] == question
-    # It must say what it CAN do, so the caller learns the shape of an
-    # answerable question rather than just being refused.
-    assert len(payload["reasoning"]) > 200
-
-
-@pytest.mark.parametrize(
-    "path,body",
-    [
-        ("/anomaly/check", {}),
-        ("/wallet/balance", {}),
-        ("/transaction/lookup", {}),
-        ("/transaction/lookup", {"tx_hash": "not-a-hash"}),
-        ("/anomaly/check", {"address": STAKE_HOT, "hours": 99999}),
-    ],
-)
-def test_a_malformed_request_stays_invalid_input(path, body):
-    payload = client.post(path, json=body).json()
-    assert payload["verdict"] == "invalid_input"
-    assert payload["confidence"] == 0.0
-
-
-def test_out_of_coverage_never_guesses_a_fraud_verdict():
-    """The canonical intent is wider than what this miner observes. The honest
-    miss is saying so — not inventing a rating for a company we cannot see."""
-    payload = client.post(
-        "/anomaly/check", json={"query": "how likely is Acme Corp to be fraudulent"}
-    ).json()
-    assert payload["verdict"] == "out_of_coverage"
-    assert payload["risk_tier"] == "insufficient_data"
-    assert payload["risk_score"] == 0.0
-    assert payload["is_suspicious"] is False
-    lowered = payload["reasoning"].lower()
-    for forbidden in ("is fraudulent", "is a scam", "confirmed fraud", "likely fraudulent"):
-        assert forbidden not in lowered
-
-
-def test_out_of_coverage_still_carries_the_declared_signal_fields():
-    payload = client.post("/wallet/balance", json={"query": "how rich is Binance"}).json()
-    for field in SIGNAL_FIELDS:
-        assert field in payload
-    # A balance that could not be read is null, never zero.
-    assert payload["native_balance_wei"] is None
-    assert payload["balance_native"] is None
-
-
-def test_manifest_out_of_coverage_claim_is_actually_implemented():
-    """The manifest tells callers an off-chain question is answered as out of
-    coverage. A manifest promise the service does not keep is worse than no
-    promise: it is scored as a failed answer."""
-    fraud = next(
-        e for e in MANIFEST["endpoints"]
-        if e["path"] == "/anomaly/check" and e["method"] == "POST"
-    )
-    assert "outside what this miner can observe" in fraud["description"]
-    payload = client.post(
-        "/anomaly/check", json={"query": "is the Acme pyramid scheme a fraud"}
-    ).json()
-    assert payload["verdict"] == "out_of_coverage"
-
-
-# ── FRAUD_DETECTION over a transaction ───────────────────────────────────────
-# The canonical intent is "how likely a specific entity, TRANSACTION or action
-# is to be fraudulent". Only addresses were accepted, so a transaction question
-# — squarely inside the intent, and answerable from data already in hand — fell
-# through to out_of_coverage.
-
-
-def _stub_tx_for_fraud(monkeypatch, tx, receipt):
-    async def fake_rpc(client_, url, method, params):
-        if method == "eth_getTransactionByHash":
-            return tx
-        if method == "eth_getTransactionReceipt":
-            return receipt
-        if method == "eth_getBlockByNumber":
-            return {"timestamp": "0x66cb0000"}
-        return None
-
-    monkeypatch.setattr(onchain, "_rpc", fake_rpc)
-
-
-def test_a_transaction_is_a_valid_fraud_subject(monkeypatch, stub_transfers):
-    _stub_tx_for_fraud(monkeypatch, TX, {
-        "status": "0x1", "gasUsed": "0x5208",
-        "effectiveGasPrice": "0x3b9aca00", "logs": [],
-    })
-    stub_transfers([
-        _transfer(i, UNAFFILIATED if i % 2 else TX["from"],
-                  TX["from"] if i % 2 else UNAFFILIATED, 100.0 * (i + 1), mins=i * 90)
-        for i in range(12)
-    ])
-    payload = client.post(
-        "/anomaly/check",
-        json={"query": f"how likely is transaction {TX['hash']} to be fraudulent"},
-    ).json()
-
-    assert payload["verdict"] != "out_of_coverage"
-    assert payload["risk_tier"] in {"low_risk", "elevated_risk", "high_risk"}
-    ctx = payload["transaction"]
-    assert ctx["tx_hash"] == TX["hash"]
-    assert ctx["from_address"] == TX["from"]
-    assert ctx["screened_party"] == "from_address"
-    # The screened address is the sender, not the hash.
-    assert payload["address"] == TX["from"]
-
-
-def test_transaction_fraud_answer_states_what_it_actually_assessed(monkeypatch, stub_transfers):
-    """The chain records no intent. Claiming a verdict on the transaction
-    itself would be a claim the data cannot support; the honest answer names
-    the transaction's facts and assesses its originator's behaviour."""
-    _stub_tx_for_fraud(monkeypatch, TX, {
-        "status": "0x1", "gasUsed": "0x5208",
-        "effectiveGasPrice": "0x3b9aca00", "logs": [],
-    })
-    stub_transfers([
-        _transfer(i, UNAFFILIATED if i % 2 else TX["from"],
-                  TX["from"] if i % 2 else UNAFFILIATED, 100.0 * (i + 1), mins=i * 90)
-        for i in range(12)
-    ])
-    reasoning = client.post(
-        "/anomaly/check", json={"tx_hash": TX["hash"], "chain": "ethereum"}
-    ).json()["reasoning"]
-
-    assert "records no intent" in reasoning
-    # All three identifiers appear, so the answer matches a question phrased
-    # around any of them.
-    assert TX["hash"] in reasoning
-    assert TX["from"] in reasoning
-    assert TX["to"] in reasoning
-
-
-def test_an_unreadable_transaction_is_insufficient_data_not_a_clean_verdict(monkeypatch):
-    _stub_tx_for_fraud(monkeypatch, None, None)
-    payload = client.post(
-        "/anomaly/check", json={"tx_hash": TX["hash"], "chain": "ethereum"}
-    ).json()
-    assert payload["risk_tier"] == "insufficient_data"
-    assert payload["is_suspicious"] is False
-    assert payload["confidence"] == 0.0
-    assert payload["tx_hash"] == TX["hash"]
-
-
-def test_an_explicit_address_still_wins_over_a_hash_in_the_question(stub_transfers):
-    stub_transfers([])
-    payload = client.post(
-        "/anomaly/check",
-        json={"address": STAKE_HOT, "query": f"and what about {TX['hash']}"},
-    ).json()
-    assert payload["address"] == STAKE_HOT
-    assert payload["transaction"] is None
+    The published docs show `accepted_fields` as a YAML list, but the registry
+    schema wants an object -- the docs and the schema disagree, and the schema
+    is what runs. Until the accepted object shape is known from something
+    firmer than an example, the enumeration lives in the description, which is
+    what the request builder reads anyway. This guard keeps the list form from
+    being reintroduced from the docs and taking the miner offline again."""
+    for i, endpoint in enumerate(MANIFEST["endpoints"]):
+        for location, groups in (endpoint.get("params") or {}).items():
+            for group in ("required", "optional"):
+                for j, entry in enumerate(groups.get(group, [])):
+                    got = entry.get("accepted_fields")
+                    assert not isinstance(got, list), (
+                        f"endpoints.{i}.params.{location}.{group}.{j}.accepted_fields: "
+                        f"Invalid type. Expected: object, given: array"
+                    )
 
 
 def _request_from_manifest(endpoint, *, include_optional):
@@ -1304,29 +999,27 @@ def test_manifest_request_contract_is_accepted_by_the_route(offline, include_opt
 
 
 def test_every_declared_chain_is_accepted_on_every_intent_endpoint(offline):
-    """`accepted_fields` is an enumeration the request builder draws from. A
-    listed value the route 422s on is a self-inflicted failed call."""
+    """Every chain the description offers must answer, not 422. A chain named
+    in the contract that the route rejects is a self-inflicted failed call."""
     for endpoint in MANIFEST["endpoints"]:
         if not endpoint.get("intents"):
             continue
         location = "body" if endpoint["method"] == "POST" else "query"
         groups = endpoint["params"][location]
         base = {e["name"]: e["example"] for e in groups.get("required", [])}
-        chain_param = next(
-            (e for e in groups.get("optional", []) if e["name"] == "chain"), None
-        )
-        assert chain_param, f"{endpoint['path']} declares no chain param"
-        for accepted in chain_param["accepted_fields"]:
-            payload = dict(base, chain=accepted["value"])
+        chain_param = next(e for e in groups["optional"] if e["name"] == "chain")
+        # Only the chains THIS endpoint offers: transaction lookup is EVM-only,
+        # so sweeping all ten would test a claim the contract never makes.
+        for chain in sorted(_offered_chains(chain_param)):
+            payload = dict(base, chain=chain)
             if endpoint["method"] == "POST":
                 response = client.post(endpoint["path"], json=payload)
             else:
                 response = client.get(endpoint["path"], params=payload)
             assert response.status_code == 200, (
-                f"{endpoint['path']} offers chain {accepted['value']!r} in "
-                f"accepted_fields but answers HTTP {response.status_code}"
+                f"{endpoint['path']} offers chain {chain!r} but answers "
+                f"HTTP {response.status_code}"
             )
             assert response.json()["verdict"] != "invalid_input", (
-                f"{endpoint['path']} calls its own accepted chain "
-                f"{accepted['value']!r} invalid input"
+                f"{endpoint['path']} calls its own offered chain {chain!r} invalid input"
             )

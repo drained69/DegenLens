@@ -44,15 +44,29 @@ python3 - "$served" <<'PY'
 import sys, yaml
 d = yaml.safe_load(open(sys.argv[1]))
 allowed_ep = {"path","external_path","method","description","endpoint_base_url",
-              "content_type","multipart_fields","param_map"}
+              "content_type","multipart_fields","param_map","intents","params"}
 for i, e in enumerate(d["endpoints"]):
     extra = set(e) - allowed_ep
     assert not extra, f"endpoints.{i} ({e.get('path')}): {sorted(extra)} not allowed"
 intents = d["semantics"]["supported_intents"]
+
+# Registration 291 was rejected for exactly this: an endpoint that declares no
+# `intents:` cannot be selected by any intent, so the miner is unroutable and
+# the node refuses it outright. Check it here rather than on-chain for gas.
+covered = set()
+for e in d["endpoints"]:
+    covered |= set(e.get("intents") or [])
+assert covered, "no endpoint declares any intents -- the node will reject this"
+missing = set(intents) - covered
+assert not missing, f"supported_intents no endpoint serves: {sorted(missing)}"
+unknown = covered - set(intents)
+assert not unknown, f"endpoints claim intents not in supported_intents: {sorted(unknown)}"
+
 for intent in intents:
     assert any((e.get("description") or "").lstrip().startswith(intent)
                for e in d["endpoints"]), f"{intent} leads no endpoint description"
 print(f"   OK: {len(d['endpoints'])} endpoints, intents {intents}")
+print(f"   OK: every intent is reachable from a declared endpoint")
 PY
 
 say "3. Confirming every intent is canonical on-chain"
@@ -76,7 +90,7 @@ export MINER_PRIVATE_KEY=0x<the wallet that owns degenlens-onchain>
 
 cast send "\$DIAMOND" \\
   "updateMiner(uint256,string,bytes32,address,uint256,string[])" \\
-  167 \\
+  \${REG_ID:?set REG_ID to the registrationId being replaced} \\
   "$YAML_URL" \\
   "0x$served_hash" \\
   0xdde7b987a01717eefcca1dc5280c164e2ccd133e \\

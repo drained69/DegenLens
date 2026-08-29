@@ -290,6 +290,47 @@ endpoints:
       tx_hash is not supplied). JSON body:
       {"tx_hash": "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431",
       "chain": "ethereum"}.
+    params:
+      body:
+        required:
+          - name: tx_hash
+            type: string
+            intents: ["*"]
+            description: "Transaction hash to look up: 0x followed by exactly 64 hexadecimal characters. Reject-free example: 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431."
+            example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
+        optional:
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche. Defaults to ethereum when absent."
+            example: "ethereum"
+            accepted_fields:
+              - value: ethereum
+                intents: ["*"]
+                description: "Ethereum mainnet."
+              - value: base
+                intents: ["*"]
+                description: "Base mainnet."
+              - value: polygon
+                intents: ["*"]
+                description: "Polygon PoS mainnet."
+              - value: arbitrum
+                intents: ["*"]
+                description: "Arbitrum One."
+              - value: optimism
+                intents: ["*"]
+                description: "OP Mainnet."
+              - value: bsc
+                intents: ["*"]
+                description: "BNB Smart Chain."
+              - value: avalanche
+                intents: ["*"]
+                description: "Avalanche C-Chain."
+          - name: query
+            type: string
+            intents: ["*"]
+            description: "The caller's original natural-language question, passed through verbatim. The transaction hash and chain are extracted from it when tx_hash is absent."
+            example: "The transaction hash and chain are extracted from it when tx_hash is absent."
 
   - path: /transaction/lookup
     external_path: /transaction/lookup
@@ -307,23 +348,42 @@ endpoints:
         required:
           - name: tx_hash
             type: string
-            intents:
-              - "*"
-            description: "0x-prefixed transaction hash of exactly 64 hex characters."
+            intents: ["*"]
+            description: "Transaction hash to look up: 0x followed by exactly 64 hexadecimal characters. Reject-free example: 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431."
             example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
         optional:
           - name: chain
             type: string
-            intents:
-              - "*"
-            description: "Chain name: ethereum, base, polygon, arbitrum, optimism, bsc or avalanche."
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche. Defaults to ethereum when absent."
             example: "ethereum"
+            accepted_fields:
+              - value: ethereum
+                intents: ["*"]
+                description: "Ethereum mainnet."
+              - value: base
+                intents: ["*"]
+                description: "Base mainnet."
+              - value: polygon
+                intents: ["*"]
+                description: "Polygon PoS mainnet."
+              - value: arbitrum
+                intents: ["*"]
+                description: "Arbitrum One."
+              - value: optimism
+                intents: ["*"]
+                description: "OP Mainnet."
+              - value: bsc
+                intents: ["*"]
+                description: "BNB Smart Chain."
+              - value: avalanche
+                intents: ["*"]
+                description: "Avalanche C-Chain."
           - name: query
             type: string
-            intents:
-              - "*"
-            description: "The original natural-language question; the hash and chain are read out of it when tx_hash is absent."
-            example: "What is the status of transaction 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431?"
+            intents: ["*"]
+            description: "The caller's original natural-language question, passed through verbatim. The transaction hash and chain are extracted from it when tx_hash is absent."
+            example: "The transaction hash and chain are extracted from it when tx_hash is absent."
 
   - path: /wallet/balance
     external_path: /wallet/balance
@@ -357,6 +417,56 @@ endpoints:
       when address is not supplied). JSON body:
       {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
       "chain": "ethereum"}.
+    params:
+      body:
+        required:
+          - name: address
+            type: string
+            intents: ["*"]
+            description: "The account to read: either 0x followed by exactly 40 hexadecimal characters, or an ENS name ending .eth which is resolved on-chain before the read. Example: 0x974caa59e49682cda0ad2bbe82983419a2ecc400."
+            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+        optional:
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
+            example: "ethereum"
+            accepted_fields:
+              - value: ethereum
+                intents: ["*"]
+                description: "Ethereum mainnet."
+              - value: base
+                intents: ["*"]
+                description: "Base mainnet."
+              - value: polygon
+                intents: ["*"]
+                description: "Polygon PoS mainnet."
+              - value: arbitrum
+                intents: ["*"]
+                description: "Arbitrum One."
+              - value: optimism
+                intents: ["*"]
+                description: "OP Mainnet."
+              - value: bsc
+                intents: ["*"]
+                description: "BNB Smart Chain."
+              - value: avalanche
+                intents: ["*"]
+                description: "Avalanche C-Chain."
+              - value: solana
+                intents: ["*"]
+                description: "Solana mainnet-beta."
+              - value: tron
+                intents: ["*"]
+                description: "Tron mainnet."
+              - value: bitcoin
+                intents: ["*"]
+                description: "Bitcoin mainnet."
+          - name: query
+            type: string
+            intents: ["*"]
+            description: "The caller's original natural-language question, passed through verbatim. The address and chain are extracted from it when address is absent."
+            example: "The address and chain are extracted from it when address is absent."
 
   - path: /wallet/balance
     external_path: /wallet/balance
@@ -374,23 +484,51 @@ endpoints:
         required:
           - name: address
             type: string
-            intents:
-              - "*"
-            description: "A 0x-prefixed address of exactly 40 hex characters, or an ENS name ending .eth."
+            intents: ["*"]
+            description: "The account to read: either 0x followed by exactly 40 hexadecimal characters, or an ENS name ending .eth which is resolved on-chain before the read. Example: 0x974caa59e49682cda0ad2bbe82983419a2ecc400."
             example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
         optional:
           - name: chain
             type: string
-            intents:
-              - "*"
-            description: "Chain name: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron or bitcoin."
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
             example: "ethereum"
+            accepted_fields:
+              - value: ethereum
+                intents: ["*"]
+                description: "Ethereum mainnet."
+              - value: base
+                intents: ["*"]
+                description: "Base mainnet."
+              - value: polygon
+                intents: ["*"]
+                description: "Polygon PoS mainnet."
+              - value: arbitrum
+                intents: ["*"]
+                description: "Arbitrum One."
+              - value: optimism
+                intents: ["*"]
+                description: "OP Mainnet."
+              - value: bsc
+                intents: ["*"]
+                description: "BNB Smart Chain."
+              - value: avalanche
+                intents: ["*"]
+                description: "Avalanche C-Chain."
+              - value: solana
+                intents: ["*"]
+                description: "Solana mainnet-beta."
+              - value: tron
+                intents: ["*"]
+                description: "Tron mainnet."
+              - value: bitcoin
+                intents: ["*"]
+                description: "Bitcoin mainnet."
           - name: query
             type: string
-            intents:
-              - "*"
-            description: "The original natural-language question; the address and chain are read out of it when address is absent."
-            example: "How much ETH does vitalik.eth hold?"
+            intents: ["*"]
+            description: "The caller's original natural-language question, passed through verbatim. The address and chain are extracted from it when address is absent."
+            example: "The address and chain are extracted from it when address is absent."
 
   - path: /wallet/trace
     external_path: /wallet/trace
@@ -413,6 +551,56 @@ endpoints:
       ethereum), query (optional, natural-language question). JSON body:
       {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
       "chain": "ethereum"}.
+    params:
+      body:
+        required:
+          - name: address
+            type: string
+            intents: ["*"]
+            description: "The account to read: either 0x followed by exactly 40 hexadecimal characters, or an ENS name ending .eth which is resolved on-chain before the read. Example: 0x974caa59e49682cda0ad2bbe82983419a2ecc400."
+            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+        optional:
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
+            example: "ethereum"
+            accepted_fields:
+              - value: ethereum
+                intents: ["*"]
+                description: "Ethereum mainnet."
+              - value: base
+                intents: ["*"]
+                description: "Base mainnet."
+              - value: polygon
+                intents: ["*"]
+                description: "Polygon PoS mainnet."
+              - value: arbitrum
+                intents: ["*"]
+                description: "Arbitrum One."
+              - value: optimism
+                intents: ["*"]
+                description: "OP Mainnet."
+              - value: bsc
+                intents: ["*"]
+                description: "BNB Smart Chain."
+              - value: avalanche
+                intents: ["*"]
+                description: "Avalanche C-Chain."
+              - value: solana
+                intents: ["*"]
+                description: "Solana mainnet-beta."
+              - value: tron
+                intents: ["*"]
+                description: "Tron mainnet."
+              - value: bitcoin
+                intents: ["*"]
+                description: "Bitcoin mainnet."
+          - name: query
+            type: string
+            intents: ["*"]
+            description: "The caller's original natural-language question, passed through verbatim. The address and chain are extracted from it when address is absent."
+            example: "The address and chain are extracted from it when address is absent."
 
   - path: /anomaly/check
     external_path: /anomaly/check
@@ -462,6 +650,66 @@ endpoints:
       explicit field is not supplied). JSON body:
       {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
       "chain": "ethereum", "hours": 24}.
+    params:
+      body:
+        required:
+          - name: address
+            type: string
+            intents: ["*"]
+            description: "The account to read: either 0x followed by exactly 40 hexadecimal characters, or an ENS name ending .eth which is resolved on-chain before the read. Example: 0x974caa59e49682cda0ad2bbe82983419a2ecc400."
+            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+        optional:
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
+            example: "ethereum"
+            accepted_fields:
+              - value: ethereum
+                intents: ["*"]
+                description: "Ethereum mainnet."
+              - value: base
+                intents: ["*"]
+                description: "Base mainnet."
+              - value: polygon
+                intents: ["*"]
+                description: "Polygon PoS mainnet."
+              - value: arbitrum
+                intents: ["*"]
+                description: "Arbitrum One."
+              - value: optimism
+                intents: ["*"]
+                description: "OP Mainnet."
+              - value: bsc
+                intents: ["*"]
+                description: "BNB Smart Chain."
+              - value: avalanche
+                intents: ["*"]
+                description: "Avalanche C-Chain."
+              - value: solana
+                intents: ["*"]
+                description: "Solana mainnet-beta."
+              - value: tron
+                intents: ["*"]
+                description: "Tron mainnet."
+              - value: bitcoin
+                intents: ["*"]
+                description: "Bitcoin mainnet."
+          - name: hours
+            type: integer
+            intents: ["*"]
+            description: "Lookback window in hours over which transfer behaviour is screened. Integer between 1 and 720 inclusive. Defaults to 24 when absent."
+            example: "24"
+          - name: tx_hash
+            type: string
+            intents: ["*"]
+            description: "Assess the SENDER of this transaction instead of a bare address: 0x followed by exactly 64 hexadecimal characters. Supply either address or tx_hash, not both; address wins when both are present. Example: 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431."
+            example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
+          - name: query
+            type: string
+            intents: ["*"]
+            description: "The caller's original natural-language question, passed through verbatim. The address, transaction hash, chain and lookback window are extracted from it when the explicit field is absent."
+            example: "The address, transaction hash, chain and lookback window are extracted from it when the explicit field is absent."
 
   - path: /anomaly/check
     external_path: /anomaly/check
@@ -480,35 +728,61 @@ endpoints:
         required:
           - name: address
             type: string
-            intents:
-              - "*"
-            description: "A 0x-prefixed address of exactly 40 hex characters, or an ENS name ending .eth."
+            intents: ["*"]
+            description: "The account to read: either 0x followed by exactly 40 hexadecimal characters, or an ENS name ending .eth which is resolved on-chain before the read. Example: 0x974caa59e49682cda0ad2bbe82983419a2ecc400."
             example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
         optional:
           - name: chain
             type: string
-            intents:
-              - "*"
-            description: "Chain name: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron or bitcoin."
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
             example: "ethereum"
+            accepted_fields:
+              - value: ethereum
+                intents: ["*"]
+                description: "Ethereum mainnet."
+              - value: base
+                intents: ["*"]
+                description: "Base mainnet."
+              - value: polygon
+                intents: ["*"]
+                description: "Polygon PoS mainnet."
+              - value: arbitrum
+                intents: ["*"]
+                description: "Arbitrum One."
+              - value: optimism
+                intents: ["*"]
+                description: "OP Mainnet."
+              - value: bsc
+                intents: ["*"]
+                description: "BNB Smart Chain."
+              - value: avalanche
+                intents: ["*"]
+                description: "Avalanche C-Chain."
+              - value: solana
+                intents: ["*"]
+                description: "Solana mainnet-beta."
+              - value: tron
+                intents: ["*"]
+                description: "Tron mainnet."
+              - value: bitcoin
+                intents: ["*"]
+                description: "Bitcoin mainnet."
           - name: hours
             type: integer
-            intents:
-              - "*"
-            description: "Lookback window in hours, between 1 and 720."
+            intents: ["*"]
+            description: "Lookback window in hours over which transfer behaviour is screened. Integer between 1 and 720 inclusive. Defaults to 24 when absent."
             example: "24"
           - name: tx_hash
             type: string
-            intents:
-              - "*"
-            description: "A transaction hash to assess the sender of, instead of an address."
+            intents: ["*"]
+            description: "Assess the SENDER of this transaction instead of a bare address: 0x followed by exactly 64 hexadecimal characters. Supply either address or tx_hash, not both; address wins when both are present. Example: 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431."
             example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
           - name: query
             type: string
-            intents:
-              - "*"
-            description: "The original natural-language question; address, hash, chain and window are read out of it when the explicit field is absent."
-            example: "How likely is 0x974caa59e49682cda0ad2bbe82983419a2ecc400 to be fraudulent?"
+            intents: ["*"]
+            description: "The caller's original natural-language question, passed through verbatim. The address, transaction hash, chain and lookback window are extracted from it when the explicit field is absent."
+            example: "The address, transaction hash, chain and lookback window are extracted from it when the explicit field is absent."
 
   - path: /casino/stats
     external_path: /casino/stats

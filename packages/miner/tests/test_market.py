@@ -262,12 +262,25 @@ def test_no_endpoint_returns_an_internal_error():
     from app.main import app as fastapi_app
 
     skip = {"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect", "/"}
+    # The intent routes answer about a specific subject, so a bare `?hours=24`
+    # names nothing to look up. `invalid_input` is then the correct, deliberate
+    # answer rather than a masked exception -- this sweep is for unhandled
+    # throws, so give those routes the identifier their contract requires and
+    # let the manifest-driven tests in test_intents.py police the contract.
+    subject = {
+        "/transaction/lookup":
+            "tx_hash=0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431",
+        "/wallet/balance": "address=0x974caa59e49682cda0ad2bbe82983419a2ecc400",
+        "/wallet/trace": "address=0x974caa59e49682cda0ad2bbe82983419a2ecc400",
+        "/anomaly/check": "address=0x974caa59e49682cda0ad2bbe82983419a2ecc400",
+    }
     for route in fastapi_app.routes:
         methods = getattr(route, "methods", set())
         path = getattr(route, "path", "")
         if "GET" not in methods or path in skip or "{" in path:
             continue
-        body = client.get(f"{path}?hours=24").json()
+        query = f"hours=24&{subject[path]}" if path in subject else "hours=24"
+        body = client.get(f"{path}?{query}").json()
         if isinstance(body, dict):
             assert body.get("error") is None, f"{path} raised {body.get('error')}"
 

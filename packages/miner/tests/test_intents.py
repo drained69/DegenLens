@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 
 import app.analytics as analytics
 import app.onchain as onchain
-from app.main import _units, app
+from app.main import DECLARED_CHAINS, _units, app
 from app.onchain import Transfer, TransferSet
 
 client = TestClient(app)
@@ -816,6 +816,7 @@ def test_declared_endpoint_params_name_real_accepted_fields():
     accepted = {
         "/transaction/lookup": {"tx_hash", "chain", "query"},
         "/wallet/balance": {"address", "chain", "query"},
+        "/wallet/trace": {"address", "chain", "query"},
         "/anomaly/check": {"address", "chain", "hours", "tx_hash", "query"},
     }
     seen = 0
@@ -825,16 +826,95 @@ def test_declared_endpoint_params_name_real_accepted_fields():
             continue
         allowed = accepted.get(endpoint["path"])
         assert allowed, f"{endpoint['path']} declares params but is not an intent endpoint"
-        query = params.get("query", {})
-        for group in ("required", "optional"):
-            for entry in query.get(group, []):
-                assert entry["name"] in allowed, (
-                    f"{endpoint['path']} declares param {entry['name']!r} it does not accept"
-                )
-                assert entry.get("description"), f"{entry['name']} has no description"
-                assert entry.get("example"), f"{entry['name']} has no example"
-                seen += 1
+        # Every location the schema permits, not just `query` -- the POST
+        # endpoints carry their contract under `body`, and those are the
+        # endpoints an intent actually routes to.
+        assert set(params) <= {"body", "query", "path", "header", "multipart"}
+        for location, groups in params.items():
+            assert set(groups) <= {"required", "optional"}
+            for group in ("required", "optional"):
+                for entry in groups.get(group, []):
+                    assert entry["name"] in allowed, (
+                        f"{endpoint['path']} declares param {entry['name']!r} it does not accept"
+                    )
+                    assert entry["type"] in {
+                        "string", "integer", "number", "boolean", "array", "object"
+                    }, f"{entry['name']} has undocumented type {entry['type']!r}"
+                    assert entry.get("intents"), f"{entry['name']} declares no intents"
+                    assert entry.get("description"), f"{entry['name']} has no description"
+                    assert entry.get("example"), f"{entry['name']} has no example"
+                    seen += 1
     assert seen, "no endpoint declares params"
+
+
+def test_every_intent_endpoint_declares_a_request_contract():
+    """`params` is what stops the node guessing field names. The docs are
+    blunt about the consequence: "Guessing is the single most common cause of
+    a miner rejecting the calls Telegraph sends it -- the node asks for `q`,
+    your API wanted `query`, and every call comes back 400." Registration 293
+    was active and scoring badly with the four POST endpoints -- the primary
+    routing target for all three intents -- declaring no params at all."""
+    for endpoint in MANIFEST["endpoints"]:
+        if not endpoint.get("intents"):
+            continue
+        params = endpoint.get("params")
+        assert params, (
+            f"{endpoint['method']} {endpoint['path']} serves "
+            f"{endpoint['intents']} but declares no params"
+        )
+        location = "body" if endpoint["method"] == "POST" else "query"
+        assert location in params, (
+            f"{endpoint['method']} {endpoint['path']} puts its params in "
+            f"{sorted(params)}, not {location!r} where the node will look"
+        )
+        assert params[location].get("required"), (
+            f"{endpoint['path']} marks no parameter required, so the request "
+            f"builder is free to omit the identifier the answer depends on"
+        )
+
+
+def test_declared_required_params_are_the_ones_the_route_actually_needs():
+    """The contract must name the identifier field, not merely some field.
+    An endpoint whose only required param were `chain` would route cleanly
+    and then answer every question about the wrong thing."""
+    identifier = {
+        "/transaction/lookup": "tx_hash",
+        "/wallet/balance": "address",
+        "/wallet/trace": "address",
+        "/anomaly/check": "address",
+    }
+    for endpoint in MANIFEST["endpoints"]:
+        if not endpoint.get("intents"):
+            continue
+        location = "body" if endpoint["method"] == "POST" else "query"
+        required = {
+            e["name"] for e in endpoint["params"][location].get("required", [])
+        }
+        assert required == {identifier[endpoint["path"]]}, (
+            f"{endpoint['path']} requires {sorted(required)}, expected "
+            f"exactly {identifier[endpoint['path']]!r}"
+        )
+
+
+def test_declared_chain_values_are_all_actually_served():
+    """`accepted_fields` is the enumeration the request builder picks from.
+    A value listed there that we reject turns a well-formed call into a 422."""
+    for endpoint in MANIFEST["endpoints"]:
+        for groups in (endpoint.get("params") or {}).values():
+            for group in ("required", "optional"):
+                for entry in groups.get(group, []):
+                    if entry["name"] != "chain":
+                        continue
+                    values = [a["value"] for a in entry.get("accepted_fields") or []]
+                    assert values, f"{endpoint['path']} chain declares no accepted_fields"
+                    for value in values:
+                        assert value in DECLARED_CHAINS, (
+                            f"{endpoint['path']} offers chain {value!r}, "
+                            f"which is not a chain this miner serves"
+                        )
+                    for a in entry["accepted_fields"]:
+                        assert a.get("intents"), f"{a['value']} declares no intents"
+                        assert a.get("description"), f"{a['value']} has no description"
 
 
 def test_signal_mapping_matches_what_every_response_returns():
@@ -1170,3 +1250,83 @@ def test_an_explicit_address_still_wins_over_a_hash_in_the_question(stub_transfe
     ).json()
     assert payload["address"] == STAKE_HOT
     assert payload["transaction"] is None
+
+
+def _request_from_manifest(endpoint, *, include_optional):
+    """Build the call the node would build, using only what the YAML declares."""
+    location = "body" if endpoint["method"] == "POST" else "query"
+    groups = endpoint["params"][location]
+    chosen = list(groups.get("required", []))
+    if include_optional:
+        # `query` is the natural-language passthrough; supplying it alongside
+        # the explicit identifier is legitimate but tests a different path.
+        chosen += [e for e in groups.get("optional", []) if e["name"] != "query"]
+    return {e["name"]: e["example"] for e in chosen}
+
+
+@pytest.mark.parametrize("include_optional", [False, True], ids=["required", "with-optional"])
+def test_manifest_request_contract_is_accepted_by_the_route(offline, include_optional):
+    """Build each intent call strictly from the manifest and fire it at the app.
+
+    This is the mismatch the docs single out: "the node asks for `q`, your API
+    wanted `query`, and every call comes back 400". A manifest that declares a
+    contract the route does not honour is worse than one that declares none --
+    it routes traffic confidently into a 422. Nothing here is hand-written:
+    the field names and values come out of `config/miner.yaml` itself, so the
+    test fails the moment the manifest and the app drift apart.
+    """
+    checked = 0
+    for endpoint in MANIFEST["endpoints"]:
+        if not endpoint.get("intents"):
+            continue
+        payload = _request_from_manifest(endpoint, include_optional=include_optional)
+        if endpoint["method"] == "POST":
+            response = client.post(endpoint["path"], json=payload)
+        else:
+            response = client.get(endpoint["path"], params=payload)
+
+        assert response.status_code == 200, (
+            f"{endpoint['method']} {endpoint['path']} rejected its own declared "
+            f"contract {payload} with HTTP {response.status_code}: {response.text[:300]}"
+        )
+        body = response.json()
+        for field in ("confidence", "verdict", "reasoning"):
+            assert field in body, (
+                f"{endpoint['path']} answered without {field!r}, which "
+                f"semantics.signal_mapping tells the node to read"
+            )
+        assert body["verdict"] != "invalid_input", (
+            f"{endpoint['path']} calls its own manifest's example request "
+            f"malformed: {payload}"
+        )
+        checked += 1
+    assert checked == 7, f"expected 7 intent endpoints, exercised {checked}"
+
+
+def test_every_declared_chain_is_accepted_on_every_intent_endpoint(offline):
+    """`accepted_fields` is an enumeration the request builder draws from. A
+    listed value the route 422s on is a self-inflicted failed call."""
+    for endpoint in MANIFEST["endpoints"]:
+        if not endpoint.get("intents"):
+            continue
+        location = "body" if endpoint["method"] == "POST" else "query"
+        groups = endpoint["params"][location]
+        base = {e["name"]: e["example"] for e in groups.get("required", [])}
+        chain_param = next(
+            (e for e in groups.get("optional", []) if e["name"] == "chain"), None
+        )
+        assert chain_param, f"{endpoint['path']} declares no chain param"
+        for accepted in chain_param["accepted_fields"]:
+            payload = dict(base, chain=accepted["value"])
+            if endpoint["method"] == "POST":
+                response = client.post(endpoint["path"], json=payload)
+            else:
+                response = client.get(endpoint["path"], params=payload)
+            assert response.status_code == 200, (
+                f"{endpoint['path']} offers chain {accepted['value']!r} in "
+                f"accepted_fields but answers HTTP {response.status_code}"
+            )
+            assert response.json()["verdict"] != "invalid_input", (
+                f"{endpoint['path']} calls its own accepted chain "
+                f"{accepted['value']!r} invalid input"
+            )

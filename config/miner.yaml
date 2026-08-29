@@ -5,45 +5,27 @@ slug: degenlens-onchain
 protocol: generic
 name: DegenMiner Evidence-Backed On-Chain Gambling Intelligence
 description: >
-  Serves three canonical intents over live EVM and non-EVM chain data.
-  ONCHAIN_TX_LOOKUP: given a transaction hash, returns that transaction's
-  status (confirmed, reverted, pending, or not_found), block number and
-  timestamp, sender, recipient, value in wei and native units, gas limit, gas
-  used, effective gas price, total fee, method id, and every ERC-20 transfer
-  decoded from the receipt logs. WALLET_BALANCE_CHECK: given an address or an
-  ENS name, returns its current native balance in exact base units and human
-  units with the asset symbol, the block the read reflects, and ERC-20 token
-  balances with contract, symbol, decimals and amounts. FRAUD_DETECTION: given
-  an address, returns how likely it is to be fraudulent as a bounded 0-1
-  risk_score and a risk_tier of insufficient_data, low_risk, elevated_risk, or
-  high_risk, backed by five named screens — round-trip return, transfer
-  velocity, counterparty concentration, dust fan-in, repeated identical amounts
-  — each reporting its measurement whether or not it fired, with known
-  exchange, bridge, DEX-router and gambling-operator counterparties identified
-  so ordinary settlement is not reported as fraud.
+  On-chain gambling intelligence, served over live EVM and non-EVM chain data.
+  Answers three canonical intents:
+    - ONCHAIN_TX_LOOKUP: given a transaction hash, returns its status
+      (confirmed, reverted, pending, or not_found), block number and timestamp,
+      sender, recipient, value, gas details, and every ERC-20 transfer decoded
+      from the receipt logs.
+    - WALLET_BALANCE_CHECK: given an address or ENS name, returns its current
+      native and ERC-20 token balances in exact base units.
+    - FRAUD_DETECTION: given an address, returns a bounded 0-1 risk_score and a
+      risk_tier (insufficient_data, low_risk, elevated_risk, or high_risk) from
+      five named transfer screens, with every measurement reported whether it
+      fired or not.
 
   Chains indexed: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche,
   solana, tron, bitcoin. Every response carries confidence, verdict, reasoning,
   data_source, and a served_at timestamp.
 
-  Honesty posture, which is load-bearing rather than decorative. A provider that
-  cannot be read returns null and data_source "unavailable" — never a zero
-  balance and never a clean risk verdict, because both are indistinguishable
-  from a real observation and both would be false. An address with too little
-  history to characterise returns insufficient_data, not low_risk. Risk tiers
-  rank review priority from observable transfer patterns; they are never a
-  finding of fraud and infer no identity or intent. Coverage for FRAUD_DETECTION
-  is on-chain addresses and transactions; a question about a named company,
-  brand, or other off-chain entity is outside what this miner can observe and is
-  answered as out of coverage with confidence 0 rather than guessed.
-
-  Beyond the three intents the same deployment serves the DegenLens application:
-  a reviewed registry of crypto-gambling operator wallet clusters and derived
-  flow, treasury, counterparty, and attribution analytics. Those endpoints are
-  documented below but are explicitly not intent targets. This miner does not
-  claim access to private casino ledgers, individual bets, game outcomes,
-  customer identity, operator revenue, or solvency; an inbound or outbound
-  transfer alone proves no deposit, wager, win, loss, or ownership relationship.
+  Answers are honest by construction: an unreadable provider returns null with
+  data_source "unavailable" rather than a zero or a guess, an address with too
+  little history returns insufficient_data rather than low_risk, and risk tiers
+  rank review priority without asserting that fraud occurred.
 
 # The combined DegenLens deployment serves both the web UI and miner API.
 base_url: https://degenlensv1.up.railway.app

@@ -262,6 +262,8 @@ endpoints:
   - path: /transaction/lookup
     external_path: /transaction/lookup
     method: POST
+    intents:
+      - ONCHAIN_TX_LOOKUP
     content_type: application/json
     description: >
       ONCHAIN_TX_LOOKUP. Answers "what is the status of transaction
@@ -292,16 +294,42 @@ endpoints:
   - path: /transaction/lookup
     external_path: /transaction/lookup
     method: GET
+    intents:
+      - ONCHAIN_TX_LOOKUP
     description: >
       ONCHAIN_TX_LOOKUP, identical to the POST form above and taking the same
       values in the query string instead of a JSON body. Query params: tx_hash
       (required, 0x-prefixed followed by exactly 64 hex characters; also
       accepted as hash or txHash), chain (optional, default ethereum), query
       (optional, natural-language question).
+    params:
+      query:
+        required:
+          - name: tx_hash
+            type: string
+            intents:
+              - "*"
+            description: "0x-prefixed transaction hash of exactly 64 hex characters."
+            example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
+        optional:
+          - name: chain
+            type: string
+            intents:
+              - "*"
+            description: "Chain name: ethereum, base, polygon, arbitrum, optimism, bsc or avalanche."
+            example: "ethereum"
+          - name: query
+            type: string
+            intents:
+              - "*"
+            description: "The original natural-language question; the hash and chain are read out of it when tx_hash is absent."
+            example: "What is the status of transaction 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431?"
 
   - path: /wallet/balance
     external_path: /wallet/balance
     method: POST
+    intents:
+      - WALLET_BALANCE_CHECK
     content_type: application/json
     description: >
       WALLET_BALANCE_CHECK. Answers "how much ETH does
@@ -333,16 +361,42 @@ endpoints:
   - path: /wallet/balance
     external_path: /wallet/balance
     method: GET
+    intents:
+      - WALLET_BALANCE_CHECK
     description: >
       WALLET_BALANCE_CHECK, identical to the POST form above and taking the
       same values in the query string instead of a JSON body. Query params:
       address (required, 0x-prefixed 40 hex characters or an ENS name ending
       .eth; also accepted as wallet), chain (optional, default ethereum),
       query (optional, natural-language question).
+    params:
+      query:
+        required:
+          - name: address
+            type: string
+            intents:
+              - "*"
+            description: "A 0x-prefixed address of exactly 40 hex characters, or an ENS name ending .eth."
+            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+        optional:
+          - name: chain
+            type: string
+            intents:
+              - "*"
+            description: "Chain name: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron or bitcoin."
+            example: "ethereum"
+          - name: query
+            type: string
+            intents:
+              - "*"
+            description: "The original natural-language question; the address and chain are read out of it when address is absent."
+            example: "How much ETH does vitalik.eth hold?"
 
   - path: /wallet/trace
     external_path: /wallet/trace
     method: POST
+    intents:
+      - WALLET_BALANCE_CHECK
     content_type: application/json
     description: >
       WALLET_BALANCE_CHECK. The same balance answer as /wallet/balance, under
@@ -363,6 +417,8 @@ endpoints:
   - path: /anomaly/check
     external_path: /anomaly/check
     method: POST
+    intents:
+      - FRAUD_DETECTION
     content_type: application/json
     description: >
       FRAUD_DETECTION. Answers "how likely is
@@ -410,6 +466,8 @@ endpoints:
   - path: /anomaly/check
     external_path: /anomaly/check
     method: GET
+    intents:
+      - FRAUD_DETECTION
     description: >
       FRAUD_DETECTION, identical to the POST form above and taking the same
       values in the query string instead of a JSON body. Query params: address
@@ -417,6 +475,40 @@ endpoints:
       also accepted as wallet), chain (optional, default ethereum), hours
       (optional, 1 to 720, default 24), query (optional, natural-language
       question).
+    params:
+      query:
+        required:
+          - name: address
+            type: string
+            intents:
+              - "*"
+            description: "A 0x-prefixed address of exactly 40 hex characters, or an ENS name ending .eth."
+            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+        optional:
+          - name: chain
+            type: string
+            intents:
+              - "*"
+            description: "Chain name: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron or bitcoin."
+            example: "ethereum"
+          - name: hours
+            type: integer
+            intents:
+              - "*"
+            description: "Lookback window in hours, between 1 and 720."
+            example: "24"
+          - name: tx_hash
+            type: string
+            intents:
+              - "*"
+            description: "A transaction hash to assess the sender of, instead of an address."
+            example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
+          - name: query
+            type: string
+            intents:
+              - "*"
+            description: "The original natural-language question; address, hash, chain and window are read out of it when the explicit field is absent."
+            example: "How likely is 0x974caa59e49682cda0ad2bbe82983419a2ecc400 to be fraudulent?"
 
   - path: /casino/stats
     external_path: /casino/stats

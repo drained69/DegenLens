@@ -776,6 +776,11 @@ _ALLOWED_TOP = {
 _ALLOWED_ENDPOINT = {
     "path", "external_path", "method", "description", "endpoint_base_url",
     "content_type", "multipart_fields", "param_map",
+    # `intents` and `params` are required by the node's request-contract
+    # validator: a manifest whose endpoints declare no `intents` is rejected
+    # as unroutable ("no endpoint declares any intents"). Registration 291 was
+    # rejected for exactly this. The shape below mirrors an accepted manifest.
+    "intents", "params",
 }
 
 
@@ -784,13 +789,52 @@ def test_manifest_uses_only_documented_top_level_keys():
     assert not extra, f"(root): Additional property {sorted(extra)} is not allowed"
 
 
-def test_manifest_endpoints_use_only_the_eight_documented_keys():
-    """`params:` and `intents:` are NOT endpoint keys — the schema rejects them.
-    Both belong inside the description string."""
+def test_manifest_endpoints_use_only_documented_keys():
     for i, endpoint in enumerate(MANIFEST["endpoints"]):
         extra = set(endpoint) - _ALLOWED_ENDPOINT
         assert not extra, f"endpoints.{i} ({endpoint.get('path')}): {sorted(extra)} not allowed"
         assert {"path", "external_path", "method"} <= set(endpoint)
+
+
+def test_every_supported_intent_is_served_by_a_declared_endpoint():
+    """The node rejects a manifest where no endpoint declares `intents:` --
+    without it no intent can select an endpoint and the miner is unroutable."""
+    declared = MANIFEST["semantics"]["supported_intents"]
+    covered = set()
+    for endpoint in MANIFEST["endpoints"]:
+        covered |= set(endpoint.get("intents") or [])
+    assert covered, "no endpoint declares any intents: the miner is unroutable"
+    missing = set(declared) - covered
+    assert not missing, f"supported_intents with no endpoint: {sorted(missing)}"
+    unknown = covered - set(declared)
+    assert not unknown, f"endpoint declares intents absent from supported_intents: {sorted(unknown)}"
+
+
+def test_declared_endpoint_params_name_real_accepted_fields():
+    """A param the endpoint does not actually accept sends the engine to a
+    field we ignore, so the answer looks unresponsive rather than wrong."""
+    accepted = {
+        "/transaction/lookup": {"tx_hash", "chain", "query"},
+        "/wallet/balance": {"address", "chain", "query"},
+        "/anomaly/check": {"address", "chain", "hours", "tx_hash", "query"},
+    }
+    seen = 0
+    for endpoint in MANIFEST["endpoints"]:
+        params = endpoint.get("params")
+        if not params:
+            continue
+        allowed = accepted.get(endpoint["path"])
+        assert allowed, f"{endpoint['path']} declares params but is not an intent endpoint"
+        query = params.get("query", {})
+        for group in ("required", "optional"):
+            for entry in query.get(group, []):
+                assert entry["name"] in allowed, (
+                    f"{endpoint['path']} declares param {entry['name']!r} it does not accept"
+                )
+                assert entry.get("description"), f"{entry['name']} has no description"
+                assert entry.get("example"), f"{entry['name']} has no example"
+                seen += 1
+    assert seen, "no endpoint declares params"
 
 
 def test_signal_mapping_matches_what_every_response_returns():

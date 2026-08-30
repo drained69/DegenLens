@@ -9,7 +9,8 @@ description: >
   status, parties, value, block, gas, fee, and token-transfer effects of a
   specific EVM transaction. WALLET_BALANCE_CHECK returns the current native and
   token balances of a specific address or ENS name. FRAUD_DETECTION screens a
-  specific address or transaction for observable transfer-risk patterns and
+  specific address or transaction for observable transfer-risk patterns,
+  answers reviewed named fraud cases with authoritative source metadata, and
   returns a bounded risk tier without claiming that fraud occurred. Supported
   chains are ethereum, base, polygon, arbitrum, optimism, bsc, avalanche,
   solana, tron, and bitcoin where the requested operation is available.
@@ -25,7 +26,9 @@ auth:
   type: none
 
 rate_limit_per_sec: 8
-cache_ttl_sec: 300
+# Transaction results are immutable, but wallet balances and risk observations
+# are not. Do not let the node cache one endpoint's live state for another.
+cache_ttl_sec: 0
 circuit_threshold: 5
 circuit_cooldown_seconds: 30
 
@@ -84,6 +87,7 @@ output_schema:
     address: { type: string }
     native_balance_wei: { type: [string, "null"] }
     native_balance: { type: [number, "null"] }
+    native_balance_exact: { type: [string, "null"] }
     token_balances: { type: array }
     risk_score:
       type: number
@@ -95,6 +99,10 @@ output_schema:
     is_suspicious: { type: boolean }
     risk_signals: { type: array }
     coverage_complete: { type: boolean }
+    mode: { type: string }
+    case: { type: string }
+    answer: { type: string }
+    source: { type: object }
 
 endpoints:
   - path: /transaction/lookup
@@ -168,8 +176,10 @@ endpoints:
       For an on-chain address, screen round-trip returns, transfer velocity,
       counterparty concentration, dust fan-in, and repeated identical amounts.
       For a transaction hash, screen its sender and return transaction context.
-      Named off-chain subjects are reported out_of_coverage rather than guessed.
-      Returns a bounded risk_score, risk_tier, concise verdict, and measurements.
+      Reviewed named cases receive a concise source-backed factual answer;
+      unknown off-chain subjects are reported out_of_coverage rather than
+      guessed. Returns a bounded risk_score, risk_tier, concise verdict, and
+      measurements for on-chain subjects.
     intents: [FRAUD_DETECTION]
     params:
       query:

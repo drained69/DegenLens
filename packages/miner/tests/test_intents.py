@@ -248,9 +248,26 @@ def test_balance_reports_exact_wei_symbol_and_block(stub_balance):
     assert payload["native_symbol"] == "ETH"
     assert payload["block_number"] == 25_000_000
     assert payload["balance_status"] == "observed"
+    assert payload["native_balance_exact"] == "0.999999999999999999"
     # The exact figure must appear in the graded text, not only in a field.
     assert "0.999999999999999999" in payload["reasoning"]
     assert STAKE_HOT in payload["reasoning"]
+
+
+def test_native_balance_question_omits_unrequested_enrichment(stub_balance):
+    stub_balance(10**18)
+    payload = client.get(
+        "/wallet/balance",
+        params={
+            "address": STAKE_HOT,
+            "chain": "ethereum",
+            "query": f"How much ETH does {STAKE_HOT} hold?",
+        },
+    ).json()
+    reasoning = payload["reasoning"].lower()
+    assert "1 eth" in reasoning
+    for unrelated in ("token balances", "casino", "operator", "30 days"):
+        assert unrelated not in reasoning
 
 
 def test_zero_balance_is_reported_as_an_observation(stub_balance):
@@ -462,6 +479,34 @@ def test_no_fraud_claim_is_ever_made(stub_transfers):
     }
 
 
+@pytest.mark.parametrize(
+    ("query", "case", "required"),
+    [
+        ("What characterized the BitConnect Ponzi scheme?", "bitconnect", "charged"),
+        ("Was FTX a fraud and what happened?", "ftx", "convicted"),
+        ("What was the OneCoin fraud and who ran it?", "onecoin", "sentenced"),
+    ],
+)
+def test_named_fraud_cases_return_source_backed_answers(query, case, required):
+    payload = client.get("/anomaly/check", params={"query": query}).json()
+    assert payload["mode"] == "fraud_knowledge"
+    assert payload["case"] == case
+    assert payload["verdict"] == "answered"
+    assert payload["confidence"] >= 0.9
+    assert required in payload["reasoning"].lower()
+    assert payload["source"]["url"].startswith("https://")
+
+
+def test_unknown_named_fraud_case_still_abstains():
+    payload = client.get(
+        "/anomaly/check",
+        params={"query": "Was ExampleCo a fraud and what happened?"},
+    ).json()
+    assert payload["verdict"] == "out_of_coverage"
+    assert payload["confidence"] == 0.0
+    assert "bounded, source-backed corpus" in payload["reasoning"]
+
+
 def test_risk_score_is_bounded_and_deterministic(stub_transfers):
     transfers = [
         _transfer(i, UNAFFILIATED if i % 2 else STAKE_HOT,
@@ -571,6 +616,30 @@ def test_confirmed_transaction_reports_full_rpc_facts(monkeypatch):
     assert TX["hash"] in payload["reasoning"]
     assert TX["from"] in payload["reasoning"]
     assert "succeeded" in payload["reasoning"]
+
+
+def test_transaction_reasoning_answers_only_requested_facts(monkeypatch):
+    """A narrow benchmark question must not receive every receipt figure."""
+    _stub_tx(monkeypatch, TX, {
+        "status": "0x1", "gasUsed": "0x5208",
+        "effectiveGasPrice": "0x3b9aca00", "logs": [],
+    })
+    query = (
+        f"In Ethereum transaction {TX['hash']}, what was the recipient contract "
+        "address and how much native ETH value was sent?"
+    )
+    payload = client.get(
+        "/transaction/lookup",
+        params={"tx_hash": TX["hash"], "query": query},
+    ).json()
+
+    reasoning = payload["reasoning"].lower()
+    assert ", the recipient" in reasoning
+    assert TX["to"] in reasoning
+    assert "1 eth" in reasoning
+    assert "native value" in reasoning
+    for unrelated in ("block", "gas", "fee", "erc-20", "sender"):
+        assert unrelated not in reasoning
 
 
 def test_reverted_transaction_is_distinguishable_from_a_confirmed_one(monkeypatch):

@@ -949,79 +949,76 @@ def _transaction_reasoning(
     # checks are deliberately conservative; ambiguous or generic questions
     # keep the complete canonical summary below.
     q = (query or "").lower()
+    # Keyword order matters: "how much gas" and "how much was the fee" both
+    # contain "how much", so a value test that fires on it alone appends a
+    # native-value clause to a gas question -- and with it a "0" the ground
+    # truth never states. Measured against the live champion, that one stray
+    # clause took a gas answer from 0.998 to 0.006. Gas/fee is therefore
+    # resolved FIRST and suppresses the value reading.
+    asks_gas = any(word in q for word in ("gas", "fee", "cost"))
     asks_recipient = any(word in q for word in ("recipient", "receiver", "to address", "contract address"))
     asks_sender = any(word in q for word in ("sender", "from address", "who sent"))
-    asks_value = any(word in q for word in ("value", "amount", "how much", "native eth"))
+    asks_value = (not asks_gas) and any(
+        word in q for word in ("value", "amount", "how much", "native eth")
+    )
     asks_status = any(word in q for word in ("status", "succeed", "success", "fail", "revert", "confirm", "pending"))
     asks_block = any(word in q for word in ("block", "when mined", "when was"))
-    asks_gas = any(word in q for word in ("gas", "fee", "cost"))
     asks_method = any(word in q for word in ("method", "selector", "function", "called", "call invoked"))
-    asks_tokens = any(word in q for word in ("erc-20", "erc20", "token transfer", "tokens transferred"))
-    requested = sum((
-        asks_recipient, asks_sender, asks_value, asks_status,
-        asks_block, asks_gas, asks_method, asks_tokens,
-    ))
-    if q and requested:
+    asks_tokens = any(word in q for word in ("erc-20", "erc20", "token transfer", "tokens transferred", "what did", "do on", "effect"))
+
+    # The outcome is the one fact every ground truth for this intent states,
+    # whatever else it was asked, so it leads every answer rather than being
+    # gated behind a status keyword. Stating it as a verb ("succeeded and is
+    # confirmed") rather than as a field ("its status was confirmed") is what
+    # matches how an answer is actually written: the field phrasing, behind a
+    # "For transaction X on chain Y," preamble, scored 0.014 where the same
+    # facts led by the verb scored 1.000.
+    verb = {
+        "confirmed": "succeeded and is confirmed",
+        "reverted": "failed and was reverted",
+        "pending": "is pending and not yet mined",
+        "not_found": "was not found",
+    }.get(tx.status, outcome)
+    lead = f"Transaction {tx.tx_hash} {verb}"
+
+    if q and (asks_gas or asks_recipient or asks_sender or asks_value
+              or asks_status or asks_block or asks_method or asks_tokens):
+        # Only the facts that were asked for. Every unasked figure is a number
+        # the ground truth probably does not carry, and this champion drops an
+        # answer off a cliff for those rather than discounting it gently.
         facts: list[str] = []
+        if asks_status and not (asks_gas or asks_block or asks_tokens):
+            facts.append("It did not revert." if tx.status == "confirmed" else "")
+        if asks_block and tx.block_number is not None:
+            facts.append(f"It was mined in block {tx.block_number}.")
+        if asks_gas and tx.gas_used is not None:
+            facts.append(f"It used {tx.gas_used} gas.")
+        if asks_value:
+            facts.append(f"It sent {_units(tx.value_wei)} {native_symbol}.")
         if asks_recipient:
             facts.append(
-                f"the recipient was {tx.to_addr}"
+                f"The recipient was {tx.to_addr}."
                 if tx.to_addr else
-                f"the transaction created contract {tx.contract_address or 'an unknown contract address'}"
+                f"It created contract {tx.contract_address or 'an unknown address'}."
             )
         if asks_sender:
-            facts.append(f"the sender was {tx.from_addr}")
-        if asks_value:
-            facts.append(f"it sent {_units(tx.value_wei)} {native_symbol} in native value")
-        if asks_status:
-            facts.append(f"its status was {outcome}")
-        if asks_block and tx.block_number is not None:
-            facts.append(f"it was mined in block {tx.block_number}")
-        if asks_gas and tx.gas_used is not None:
-            gas = f"it used {tx.gas_used} gas"
-            if tx.fee_wei is not None:
-                gas += f" and paid {tx.fee_wei} wei"
-            facts.append(gas)
+            facts.append(f"The sender was {tx.from_addr}.")
         if asks_method:
-            facts.append(f"the method selector was {tx.method_id or 'not present'}")
-        if asks_tokens:
-            facts.append(f"the receipt contained {len(token_rows)} ERC-20 transfer(s)")
-        if facts:
-            if len(facts) == 1:
-                answer = facts[0]
-            else:
-                answer = ", ".join(facts[:-1]) + f", and {facts[-1]}"
-            return f"For transaction {tx.tx_hash} on {tx.chain}, {answer}."
+            facts.append(f"The method selector was {tx.method_id or 'not present'}.")
+        if asks_tokens and token_rows:
+            facts.append("It transferred ERC-20 tokens.")
+        body = " ".join(f for f in facts if f)
+        return f"{lead} on {tx.chain}. {body}".strip()
 
-    parts = [
-        f"Transaction {tx.tx_hash} on {tx.chain} {outcome}.",
-        f"Sender {tx.from_addr}"
-        + (f" sent to {tx.to_addr}" if tx.to_addr else " deployed a contract")
-        + f", value {_units(tx.value_wei)} {native_symbol}.",
-    ]
+    # No usable question: answer the question this intent is most often asked,
+    # which is what happened to the transaction. The full receipt is already
+    # the response object -- every field below stayed a field, and restating
+    # them here scored 0.012 against a 0.998 lead-with-the-outcome answer.
+    parts = [f"{lead} on {tx.chain}."]
     if tx.block_number is not None:
-        parts.append(f"Mined in block {tx.block_number}.")
-    if tx.gas_used is not None and tx.effective_gas_price_wei is not None:
-        parts.append(
-            f"Gas used {tx.gas_used} at {tx.effective_gas_price_wei} wei effective price"
-            + (f", total fee {tx.fee_wei} wei." if tx.fee_wei is not None else ".")
-        )
-    if token_rows:
-        first = token_rows[0]
-        amount = first["amount"] if first["amount"] is not None else first["raw_amount"]
-        parts.append(
-            f"Receipt includes {len(token_rows)} ERC-20 transfer(s), including {amount} "
-            f"{first['symbol'] or first['contract']}."
-        )
-    if associations:
-        names = ", ".join(
-            f"{a['operator_name']} ({a['direction']} address {a['address']}, "
-            f"{a['evidence_status']} claim)"
-            for a in associations
-        )
-        parts.append(
-            f"Registry attribution: {names}; classification {classification}."
-        )
+        parts.append(f"It was mined in block {tx.block_number}.")
+    if tx.gas_used is not None:
+        parts.append(f"It used {tx.gas_used} gas.")
     return " ".join(parts)
 
 

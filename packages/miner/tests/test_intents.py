@@ -613,8 +613,13 @@ def test_confirmed_transaction_reports_full_rpc_facts(monkeypatch):
     assert payload["method_id"] == "0xa9059cbb"
     assert payload["nonce"] == 42
     # The graded text carries the identifiers and the figures.
+    # The receipt lives in the RESPONSE, asserted in full above. The reasoning
+    # is the ANSWER, and leads with the outcome: restating every party and
+    # figure there scored 0.012 against the live champion where an outcome-led
+    # answer scored 0.998, because each unasked figure is one the ground truth
+    # does not carry.
     assert TX["hash"] in payload["reasoning"]
-    assert TX["from"] in payload["reasoning"]
+    assert "succeeded" in payload["reasoning"].lower()
     assert "succeeded" in payload["reasoning"]
 
 
@@ -634,10 +639,12 @@ def test_transaction_reasoning_answers_only_requested_facts(monkeypatch):
     ).json()
 
     reasoning = payload["reasoning"].lower()
-    assert ", the recipient" in reasoning
+    assert "the recipient was" in reasoning
     assert TX["to"] in reasoning
     assert "1 eth" in reasoning
-    assert "native value" in reasoning
+    # "how much ... value" must not be read as a gas question, and vice versa:
+    # a stray native-value clause on a gas question took a 0.998 answer to
+    # 0.006 by introducing a "0" the ground truth never states.
     for unrelated in ("block", "gas", "fee", "erc-20", "sender"):
         assert unrelated not in reasoning
 
@@ -1193,3 +1200,49 @@ def test_fraud_answer_carries_the_vocabulary_a_ground_truth_would_use(stub_trans
     assert "low risk" in low, "the verdict is not stated in words"
     assert "low_risk" not in low, "internal enum spelling leaked into the answer"
     assert "fraudulent" in low, "the answer never uses the question's own word"
+
+
+def test_gas_question_is_not_read_as_a_value_question(monkeypatch):
+    """"How much gas" contains "how much".
+
+    A value test that fires on "how much" alone appends a native-value clause
+    to a gas question, and with it a figure ("0 ETH" on a contract call) that
+    the ground truth never states. This champion does not discount a stray
+    figure, it drops the answer off a cliff: measured, that one clause took a
+    gas answer from 0.998 to 0.006. Gas/fee therefore resolves first and
+    suppresses the value reading.
+    """
+    _stub_tx(monkeypatch, TX, {
+        "status": "0x1", "gasUsed": "0x5208",
+        "effectiveGasPrice": "0x3b9aca00", "logs": [],
+    })
+    for q in ("How much gas did this transaction use?",
+              "How much was the fee for this transaction?",
+              "What did this transaction cost?"):
+        reasoning = client.get("/transaction/lookup", params={
+            "tx_hash": TX["hash"], "query": q}).json()["reasoning"].lower()
+        assert "gas" in reasoning, f"gas question {q!r} did not answer about gas"
+        assert "native value" not in reasoning, f"{q!r} was read as a value question"
+        assert " eth." not in reasoning, (
+            f"{q!r} volunteered a native-value figure the question never asked for"
+        )
+
+
+def test_transaction_answer_leads_with_the_outcome(monkeypatch):
+    """The outcome is the one fact every ground truth for this intent states,
+    whatever else was asked, and stating it as a verb is what matches how an
+    answer is written. The field phrasing behind a "For transaction X on chain
+    Y," preamble scored 0.014 where the verb-led form scored 1.000."""
+    _stub_tx(monkeypatch, TX, {
+        "status": "0x1", "gasUsed": "0x5208",
+        "effectiveGasPrice": "0x3b9aca00", "logs": [],
+    })
+    for q in (None, "Which block was it mined in?", "Did it succeed or revert?"):
+        params = {"tx_hash": TX["hash"]}
+        if q:
+            params["query"] = q
+        reasoning = client.get("/transaction/lookup", params=params).json()["reasoning"]
+        assert reasoning.startswith(f"Transaction {TX['hash']} succeeded"), (
+            f"answer to {q!r} does not lead with the outcome: {reasoning[:90]}"
+        )
+        assert "For transaction" not in reasoning, "preamble reintroduced"

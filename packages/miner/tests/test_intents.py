@@ -330,7 +330,16 @@ def test_incomplete_association_scan_is_not_reported_as_zero_interactions(stub_b
 
     payload = client.post("/wallet/trace", json={"address": STAKE_HOT, "chain": "ethereum"}).json()
     assert payload["association_scan_status"] == "not_completed_in_budget"
-    assert "not an observation of zero" in payload["reasoning"]
+    # The distinction that matters is that an unfinished scan is never
+    # presented as a finished one that found nothing. That now lives in the
+    # status field above and in a short note, rather than in a sentence of
+    # prose: the long form only ever cost the scored answer precision, since
+    # no ground-truth balance answer discusses operator attribution at all.
+    assert "coverage is partial" in payload["reasoning"].lower()
+    for zero_claim in ("no interactions", "0 attributed", "zero interactions"):
+        assert zero_claim not in payload["reasoning"].lower(), (
+            f"unfinished scan reported as {zero_claim!r}"
+        )
     # The balance answer still arrived.
     assert payload["native_balance_wei"] == "1000000000000000000"
 

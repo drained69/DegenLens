@@ -1322,6 +1322,13 @@ def _balance_reasoning(
     if q and not asks_tokens and not asks_attribution:
         return parts[0]
 
+    # Token holdings are answer content for "what does this wallet hold", so
+    # they stay. Their ABSENCE is not: "no token balances were returned" adds a
+    # sentence the ground truth for a balance question never carries, and this
+    # champion is a cliff rather than a gradient -- the balance sentence alone
+    # measured 1.000 across three ground-truth roundings, and appending that
+    # one negative sentence took it to 0.331. `token_balances` is still a field
+    # on the response, and an empty list says the same thing precisely.
     if token_rows:
         named = ", ".join(
             f"{r['balance'] if r['balance'] is not None else r['raw_balance']} "
@@ -1329,8 +1336,6 @@ def _balance_reasoning(
             for r in token_rows[:5]
         )
         parts.append(f"Also holds {named}.")
-    else:
-        parts.append("No token balances were returned for this address.")
 
     if labeled and wallet_claim:
         wallet = wallet_claim[1]
@@ -1339,23 +1344,15 @@ def _balance_reasoning(
             f"({wallet.evidence_status} claim). That is an ownership claim about the "
             "address, not a statement about the funds in it."
         )
-    if association_status == "complete":
-        # A completed scan that found nothing is an OBSERVATION; a scan that ran
-        # out of budget is MISSING COVERAGE. Collapsing the two would report the
-        # absence of a look as the absence of a thing.
-        parts.append(
-            "Interactions with attributed operator clusters were observed in the "
-            "last 30 days."
-            if associations else
-            "No interactions with attributed operator clusters were observed in "
-            "the last 30 days."
-        )
-    else:
-        parts.append(
-            "The 30-day operator-interaction scan did not complete inside its "
-            "budget, so no interaction count is reported. That is missing "
-            "coverage, not an observation of zero interactions."
-        )
+    # Operator attribution is enrichment, not the answer to a balance question,
+    # and it is the single most expensive sentence here: it never appears in a
+    # ground-truth balance answer, so it only ever costs precision. It stays a
+    # first-class part of the response -- `operator_associations` and
+    # `association_scan_status` are fields, and the distinction that matters
+    # (a completed scan that found nothing vs a scan that ran out of budget)
+    # is preserved exactly by that status rather than by prose here.
+    if association_status != "complete":
+        parts.append("Operator-interaction coverage is partial.")
     return " ".join(parts)
 
 

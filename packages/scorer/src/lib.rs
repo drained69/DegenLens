@@ -62,10 +62,14 @@ const B_AGREE: f32 = 0.4;
 /// suspicious. Keep this adjustment separate from generic yes/no language because
 /// a fraud answer may say "no signals fired" while still containing many negative
 /// words in its explanation.
-const FRAUD_AUTH_CONTRA: f32 = 0.06;
-const FRAUD_AUTH_TWO_FACED: f32 = 0.12;
 const FRAUD_AUTH_AGREE: f32 = 0.62;
-const FRAUD_AUTH_SILENT: f32 = 0.34;
+// The fraud benchmark treats the risk conclusion and its evidence as the answer,
+// not as optional prose. These remain nonzero so real traffic keeps a graded tail.
+const FRAUD_STRICT_CONTRA: f32 = 0.008;
+const FRAUD_STRICT_TWO_FACED: f32 = 0.015;
+const FRAUD_STRICT_SILENT: f32 = 0.22;
+const FRAUD_FACT_MISS: f32 = 0.18;
+const FRAUD_ID_MISS: f32 = 0.12;
 /// Numbers: floor when a stated figure is missing, multiplier when a different one
 /// is asserted instead. On a lookup intent the figure is the answer, so an otherwise
 /// fluent reply that never states it has not answered the question — but it is vague
@@ -385,7 +389,7 @@ pub unsafe extern "C" fn dealloc(_ptr: i32, _size: i32) {}
 /// can be traced back to the configuration it was measured with. Space padded to a
 /// fixed width so the build stays byte-for-byte reproducible.
 #[unsafe(no_mangle)]
-pub static TELEGRAPH_INTENT: [u8; 32] = *b"ONCHAIN_TX_LOOKUP               ";
+pub static TELEGRAPH_INTENT: [u8; 32] = *b"FRAUD_DETECTION                 ";
 
 // ---------------------------------------------------------------------------
 // Byte-level primitives
@@ -2371,20 +2375,26 @@ fn score(q: &[u8], gt: &[u8], ma: &[u8]) -> f32 {
             if g_auth != 0 {
                 let (a_auth, a_mixed) = axis_sign(ta, AUTH_POS, AUTH_NEG);
                 if a_auth != 0 && a_auth != g_auth {
-                    raw *= if a_mixed {
-                        FRAUD_AUTH_TWO_FACED
-                    } else {
-                        FRAUD_AUTH_CONTRA
-                    };
+                    raw *= if a_mixed { FRAUD_STRICT_TWO_FACED } else { FRAUD_STRICT_CONTRA };
                 } else if a_auth == g_auth && a_mixed {
                     // A correct lead followed by the opposite risk claim is not a
                     // correct answer. Check this before the agreement bonus.
-                    raw *= FRAUD_AUTH_TWO_FACED;
+                    raw *= FRAUD_STRICT_TWO_FACED;
                 } else if a_auth == g_auth {
                     raw += (1.0 - raw) * FRAUD_AUTH_AGREE;
                 } else {
-                    raw *= FRAUD_AUTH_SILENT;
+                    raw *= FRAUD_STRICT_SILENT;
                 }
+            }
+
+            // A correct-sounding verdict without the observed evidence is not
+            // equivalent to a measured fraud assessment. Penalize incompleteness
+            // only for facts the ground truth actually supplied.
+            if gt_nums > 0 && gt_nums_hit < gt_nums {
+                raw *= FRAUD_FACT_MISS;
+            }
+            if id_tot > 0 && id_hit < id_tot {
+                raw *= FRAUD_ID_MISS;
             }
         }
 

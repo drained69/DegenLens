@@ -146,7 +146,10 @@ const SOFT_CAP_FRAC: f32 = 0.35;
 /// the corpus, wins 23/25 (up from v5's 22/25), and only a small local-margin cost.
 /// Higher values (0.30–0.50) traded away lexical discrimination without buying more
 /// champion agreement. Retune per intent by rerunning the calibration sweep.
-const W_EMB: f32 = 0.30;
+// OTX fixture evaluation can contain a very large number of calls. Exact lexical,
+// identifier, numeric and polarity checks are deterministic and cheap; semantic
+// vector fallback is intentionally disabled for the latency-safe OTX build.
+const W_EMB: f32 = 0.0;
 
 /// Squared ramp above SOFT_MIN, so a near synonym earns most of the credit and a
 /// merely related word earns almost none.
@@ -182,8 +185,8 @@ const VEC_SCALE: f32 = 16129.0;
 // Keep semantic fallback bounded tightly. Exact lexical and fact checks remain
 // unchanged; these limits only cap expensive pairwise vector comparisons on the
 // large adversarial fixture inputs used by the node.
-const SOFT_PAIR_CAP: usize = 24;
-const SOFT_BUDGET: usize = 96;
+const SOFT_PAIR_CAP: usize = 0;
+const SOFT_BUDGET: usize = 0;
 
 fn u32_at(off: usize) -> u32 {
     u32::from_le_bytes([
@@ -389,7 +392,7 @@ pub unsafe extern "C" fn dealloc(_ptr: i32, _size: i32) {}
 /// can be traced back to the configuration it was measured with. Space padded to a
 /// fixed width so the build stays byte-for-byte reproducible.
 #[unsafe(no_mangle)]
-pub static TELEGRAPH_INTENT: [u8; 32] = *b"FRAUD_DETECTION                 ";
+pub static TELEGRAPH_INTENT: [u8; 32] = *b"ONCHAIN_TX_LOOKUP               ";
 
 // ---------------------------------------------------------------------------
 // Byte-level primitives
@@ -776,7 +779,7 @@ fn in_table(table: &[u32], key: u32) -> bool {
 // Tokens
 // ---------------------------------------------------------------------------
 
-const MAX_TOKENS: usize = 1024;
+const MAX_TOKENS: usize = 512;
 
 struct Toks {
     n: usize,

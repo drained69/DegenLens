@@ -58,6 +58,14 @@ const M_CONTRA: f32 = 0.16;
 const M_TWO_FACED: f32 = 0.28;
 const M_SILENT: f32 = 0.9;
 const B_AGREE: f32 = 0.4;
+/// Fraud has one primary claim axis: whether the observed activity is benign or
+/// suspicious. Keep this adjustment separate from generic yes/no language because
+/// a fraud answer may say "no signals fired" while still containing many negative
+/// words in its explanation.
+const FRAUD_AUTH_CONTRA: f32 = 0.06;
+const FRAUD_AUTH_TWO_FACED: f32 = 0.12;
+const FRAUD_AUTH_AGREE: f32 = 0.62;
+const FRAUD_AUTH_SILENT: f32 = 0.34;
 /// Numbers: floor when a stated figure is missing, multiplier when a different one
 /// is asserted instead. On a lookup intent the figure is the answer, so an otherwise
 /// fluent reply that never states it has not answered the question — but it is vague
@@ -1519,13 +1527,13 @@ const AUTH_POS: &[u32] = &[
     h(b"safe"),
     h(b"legitimate"),
     h(b"organic"),
+    h(b"low"),
     h(b"normal"),
     h(b"routine"),
     h(b"compliant"),
     h(b"transparent"),
     h(b"minimal"),
-    h(b"clear"),
-    h(b"clean"),
+    h(b"minor"),
 ];
 const AUTH_NEG: &[u32] = &[
     h(b"ai"),
@@ -1548,9 +1556,7 @@ const AUTH_NEG: &[u32] = &[
     h(b"scammy"),
     h(b"risky"),
     h(b"flagged"),
-    h(b"red"),
     h(b"elevated"),
-    h(b"high"),
     h(b"deepfake"),
     h(b"bot"),
 ];
@@ -1692,6 +1698,15 @@ fn any_negation(t: &Toks) -> bool {
         i += 1;
     }
     false
+}
+
+#[inline]
+fn fraud_intent() -> bool {
+    TELEGRAPH_INTENT[0] == b'F'
+        && TELEGRAPH_INTENT[1] == b'R'
+        && TELEGRAPH_INTENT[2] == b'A'
+        && TELEGRAPH_INTENT[3] == b'U'
+        && TELEGRAPH_INTENT[4] == b'D'
 }
 
 /// Byte equality over word bytes only: case, spacing and punctuation are
@@ -2342,6 +2357,32 @@ fn score(q: &[u8], gt: &[u8], ma: &[u8]) -> f32 {
         } else if any_negation(tg) != any_negation(ta) {
             // No axis is decisive, but one side negates and the other does not.
             raw *= 1.0 - 0.35 * lex;
+        }
+
+        // Fraud is not merely a generic yes/no question. The risk conclusion is
+        // the deliverable, so preserve smooth ranking but apply a second, narrowly
+        // scoped authenticity check. This catches answers that copy all measured
+        // transfers and then invert only "low risk" versus "suspicious".
+        if fraud_intent() {
+            let (g_auth, _) = axis_sign(tg, AUTH_POS, AUTH_NEG);
+            if g_auth != 0 {
+                let (a_auth, a_mixed) = axis_sign(ta, AUTH_POS, AUTH_NEG);
+                if a_auth != 0 && a_auth != g_auth {
+                    raw *= if a_mixed {
+                        FRAUD_AUTH_TWO_FACED
+                    } else {
+                        FRAUD_AUTH_CONTRA
+                    };
+                } else if a_auth == g_auth && a_mixed {
+                    // A correct lead followed by the opposite risk claim is not a
+                    // correct answer. Check this before the agreement bonus.
+                    raw *= FRAUD_AUTH_TWO_FACED;
+                } else if a_auth == g_auth {
+                    raw += (1.0 - raw) * FRAUD_AUTH_AGREE;
+                } else {
+                    raw *= FRAUD_AUTH_SILENT;
+                }
+            }
         }
 
         // Contrast. Pull confident matches up and near-misses down without

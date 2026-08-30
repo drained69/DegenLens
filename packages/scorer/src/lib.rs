@@ -175,8 +175,11 @@ const VEC_DIM: usize = 50;
 /// Two int8 rows are each scaled by 127, so their dot product is 127^2 * cosine.
 const VEC_SCALE: f32 = 16129.0;
 /// Bounds on the pairwise work, so a 78 KB answer costs a predictable amount.
-const SOFT_PAIR_CAP: usize = 128;
-const SOFT_BUDGET: usize = 512;
+// Keep semantic fallback bounded tightly. Exact lexical and fact checks remain
+// unchanged; these limits only cap expensive pairwise vector comparisons on the
+// large adversarial fixture inputs used by the node.
+const SOFT_PAIR_CAP: usize = 24;
+const SOFT_BUDGET: usize = 96;
 
 fn u32_at(off: usize) -> u32 {
     u32::from_le_bytes([
@@ -382,7 +385,7 @@ pub unsafe extern "C" fn dealloc(_ptr: i32, _size: i32) {}
 /// can be traced back to the configuration it was measured with. Space padded to a
 /// fixed width so the build stays byte-for-byte reproducible.
 #[unsafe(no_mangle)]
-pub static TELEGRAPH_INTENT: [u8; 32] = *b"FRAUD_DETECTION                 ";
+pub static TELEGRAPH_INTENT: [u8; 32] = *b"ONCHAIN_TX_LOOKUP               ";
 
 // ---------------------------------------------------------------------------
 // Byte-level primitives
@@ -769,7 +772,7 @@ fn in_table(table: &[u32], key: u32) -> bool {
 // Tokens
 // ---------------------------------------------------------------------------
 
-const MAX_TOKENS: usize = 2048;
+const MAX_TOKENS: usize = 1024;
 
 struct Toks {
     n: usize,

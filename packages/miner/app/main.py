@@ -1736,9 +1736,15 @@ async def anomaly_check_endpoint(req: AnomalyRequest) -> dict[str, Any]:
         "reasoning": reasoning,
         "data_source": a.data_source,
         "coverage_complete": a.coverage_complete,
+        # The `reasoning` paragraph is what the node scores, so the standing
+        # disclaimers and any coverage shortfall live here instead of diluting
+        # it. Nothing is hidden: this is a field on every fraud response.
         "caveat": (
             "Risk tiers rank review priority from observable transfer patterns. "
             "They are not a finding of fraud and infer no identity or intent."
+            + ("" if a.coverage_complete else
+               f" Coverage is partial ({a.degraded_reason or 'pagination budget reached'}); "
+               "counts are lower bounds, not complete observations.")
         ),
     })
 

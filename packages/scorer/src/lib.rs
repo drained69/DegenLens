@@ -51,10 +51,13 @@ const R_FLOOR: f32 = 0.3;
 /// Polarity multipliers. Lower on contradiction separates good from bad harder;
 /// higher keeps a wrong-but-on-topic answer inside the pack, which is where the
 /// champion puts it, and the traffic gate scores agreement with the champion.
-const M_CONTRA: f32 = 0.3;
-const M_TWO_FACED: f32 = 0.5;
-const M_SILENT: f32 = 0.95;
-const B_AGREE: f32 = 0.35;
+// Fraud answers are verdict-bearing. A fluent answer about the right wallet that
+// reverses the risk conclusion must stay well below a cautious answer that omits
+// the conclusion, while still retaining a graded tail for traffic ranking.
+const M_CONTRA: f32 = 0.16;
+const M_TWO_FACED: f32 = 0.28;
+const M_SILENT: f32 = 0.9;
+const B_AGREE: f32 = 0.4;
 /// Numbers: floor when a stated figure is missing, multiplier when a different one
 /// is asserted instead. On a lookup intent the figure is the answer, so an otherwise
 /// fluent reply that never states it has not answered the question — but it is vague
@@ -82,7 +85,7 @@ const M_ENTITY: f32 = 0.3;
 /// The gap between the two is the point: omitting a name and asserting the wrong one
 /// are different mistakes and must not cost the same.
 const M_ENT_MISS: f32 = 0.78;
-const M_ENT_SWAP: f32 = 0.15;
+const M_ENT_SWAP: f32 = 0.1;
 /// Identifiers (addresses, transaction hashes). `MISS` is the floor when the answer
 /// never states an identifier the ground truth does; `WRONG` is the multiplier when
 /// it states a different one. Both are harsher than their named-entity equivalents:
@@ -90,7 +93,7 @@ const M_ENT_SWAP: f32 = 0.15;
 /// same name, but an address is a single exact string and a near miss is a different
 /// account entirely.
 const M_ID_MISS: f32 = 0.55;
-const M_ID_WRONG: f32 = 0.045;
+const M_ID_WRONG: f32 = 0.03;
 /// How much of the score a negated match costs. "No rain is expected" covers every
 /// content word of "rain is expected" and asserts the opposite, so coverage that only
 /// holds under a negation the ground truth does not carry is worth less than nothing.

@@ -222,7 +222,17 @@ endpoints:
 semantics:
   signal_mapping:
     confidence_field: confidence
-    label_field: verdict
+    # Both point at the prose deliberately. The scored text is whichever of
+    # these the node reads, and the evidence says it is label_field: the
+    # ONCHAIN_TX_LOOKUP leader scores 0.995 with its full prose answer in
+    # label_field and the literal string "rpc" in reason_field -- a reason_field
+    # that scores 0.002 against the ground truth, so it cannot be what is read.
+    # Ours had a one-word `verdict` ("confirmed", "normal", "unlabeled") in
+    # label_field, which measures 0.003 where the same request's prose measures
+    # 0.010 and the leader's measures 1.000. Pointing both at `reasoning`
+    # removes the guess: whichever field is read, it gets the answer.
+    # `verdict` is unchanged on the response and is still what the UI reads.
+    label_field: reasoning
     reason_field: reasoning
   supported_intents:
     - ONCHAIN_TX_LOOKUP

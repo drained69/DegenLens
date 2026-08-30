@@ -1,33 +1,19 @@
 version: "1"
 kind: miner
-id: 10002                   # assigned for DegenMiner; must remain unique
+id: 10002
 slug: degenlens-onchain
 protocol: generic
-name: DegenMiner Evidence-Backed On-Chain Gambling Intelligence
+name: DegenLens On-Chain Intelligence
 description: >
-  On-chain gambling intelligence, served over live EVM and non-EVM chain data.
-  Answers three canonical intents:
-    - ONCHAIN_TX_LOOKUP: given a transaction hash, returns its status
-      (confirmed, reverted, pending, or not_found), block number and timestamp,
-      sender, recipient, value, gas details, and every ERC-20 transfer decoded
-      from the receipt logs.
-    - WALLET_BALANCE_CHECK: given an address or ENS name, returns its current
-      native and ERC-20 token balances in exact base units.
-    - FRAUD_DETECTION: given an address, returns a bounded 0-1 risk_score and a
-      risk_tier (insufficient_data, low_risk, elevated_risk, or high_risk) from
-      five named transfer screens, with every measurement reported whether it
-      fired or not.
+  Live, evidence-backed blockchain intelligence. ONCHAIN_TX_LOOKUP returns the
+  status, parties, value, block, gas, fee, and token-transfer effects of a
+  specific EVM transaction. WALLET_BALANCE_CHECK returns the current native and
+  token balances of a specific address or ENS name. FRAUD_DETECTION screens a
+  specific address or transaction for observable transfer-risk patterns and
+  returns a bounded risk tier without claiming that fraud occurred. Supported
+  chains are ethereum, base, polygon, arbitrum, optimism, bsc, avalanche,
+  solana, tron, and bitcoin where the requested operation is available.
 
-  Chains indexed: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche,
-  solana, tron, bitcoin. Every response carries confidence, verdict, reasoning,
-  data_source, and a served_at timestamp.
-
-  Answers are honest by construction: an unreadable provider returns null with
-  data_source "unavailable" rather than a zero or a guess, an address with too
-  little history returns insufficient_data rather than low_risk, and risk tiers
-  rank review priority without asserting that fraud occurred.
-
-# The combined DegenLens deployment serves both the web UI and miner API.
 base_url: https://degenlensv1.up.railway.app
 
 docs:
@@ -35,15 +21,9 @@ docs:
   documentation: https://degenlensv1.up.railway.app/docs
   repository: https://github.com/drained69/DegenLens
 
-# The API is publicly accessible and requires no credentials. Declaring
-# `type: none` explicitly tells the node not to inject auth headers or query
-# parameters when forwarding requests.
 auth:
   type: none
 
-# ── Operational envelope ─────────────────────────────────────────────────────
-# Declared honestly: the node enforces these, and overpromising causes timeouts
-# that count as failed answers.
 rate_limit_per_sec: 8
 cache_ttl_sec: 300
 circuit_threshold: 5
@@ -52,46 +32,19 @@ circuit_cooldown_seconds: 30
 input_schema:
   type: object
   description: >
-    Endpoint requests are intentionally small and deterministic. Transaction
-    lookup accepts a canonical EVM transaction hash and chain. Operator flow
-    endpoints accept a registry slug and lookback hours. Wallet, player, and
-    anomaly endpoints accept a 0x-prefixed EVM address, chain, and optional
-    lookback. Aggregate GET endpoints accept bounded query parameters. See each
-    endpoint description for its exact request shape and default window. The
-    live chain index is ethereum, base, polygon, arbitrum, optimism, bsc,
-    avalanche, solana, tron, and bitcoin. EVM reads use Alchemy; non-EVM native
-    transfer reads use configured Solana JSON-RPC, TronGrid, and Esplora
-    endpoints. Availability also depends on reviewed wallet attribution,
-     upstream health, token pricing, pagination limits, and the requested
-     lookback window.
+    Supply the identifier required by the selected endpoint. Explicit fields
+    take precedence over values extracted from query.
   properties:
-    slug:
+    tx_hash:
       type: string
-      description: "Casino identifier, e.g. 'stake' or 'shuffle'. See GET /casinos."
-      examples: ["stake", "shuffle"]
+      pattern: "^0x[a-fA-F0-9]{64}$"
+      description: Canonical EVM transaction hash.
     address:
       type: string
-      description: >
-        Subject of a balance or risk question. Either a 0x-prefixed EVM address
-        of exactly 40 hex characters, an ENS name ending .eth (resolved on-chain
-        through the ENS registry; a name with no resolver is reported as
-        unresolved rather than answered against another account), or a native
-        Solana, Tron, or Bitcoin address. Also accepted as wallet, account, or
-        ens. Never abbreviate it — a shortened address is a different string and
-        is rejected as invalid input.
-      examples:
-        - "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
-        - "vitalik.eth"
+      description: EVM address, ENS name, or supported native-chain address.
     query:
       type: string
-      description: >
-        The original natural-language question. Optional on every intent
-        endpoint and used only as a fallback: when address or tx_hash is not
-        supplied, the transaction hash, address, ENS name, chain, and lookback
-        window are read out of this string. Explicit fields always win.
-      examples:
-        - "how much ETH does 0x974caa59e49682cda0ad2bbe82983419a2ecc400 hold"
-        - "how likely is vitalik.eth to be fraudulent"
+      description: Original natural-language question.
     chain:
       type: string
       enum: [ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin]
@@ -101,17 +54,6 @@ input_schema:
       minimum: 1
       maximum: 720
       default: 24
-      description: "Lookback window in hours."
-    tx_hash:
-      type: string
-      pattern: "^0x[a-fA-F0-9]{64}$"
-      description: >
-        Canonical EVM transaction hash: 0x followed by exactly 64 hex
-        characters. Also accepted as txHash, hash, transaction_hash, or
-        transactionHash. Never abbreviate it — a shortened hash identifies no
-        transaction and is rejected as invalid input.
-      examples:
-        - "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
 
 output_schema:
   type: object
@@ -121,785 +63,143 @@ output_schema:
       type: number
       minimum: 0
       maximum: 1
-      description: >
-        Confidence for the returned answer, not certainty about an operator,
-        person, wager, or criminal act. It is 0 when data is unavailable and
-        is capped when attribution is curated, coverage is partial, or the
-        result is derived from transfers rather than a direct chain fact.
+      description: Confidence in the returned observation, not certainty of fraud.
     verdict:
       type: string
-      description: >
-        Short label. net_inflow|net_outflow for operator flow; normal|suspicious|
-        critical for fraud screening (the legacy alias of risk_tier, retained for
-        existing consumers); the casino slug or 'unlabeled' for wallet traces;
-        the transaction status for lookups; 'invalid_input' when a request failed
-        validation before any chain read was attempted.
+      description: Primary status or decision label.
     reasoning:
       type: string
-      description: "Human-readable explanation of how the verdict was reached."
+      description: Concise canonical answer containing the primary facts.
     data_source:
       type: string
       enum: [live, demo, unavailable, registry, derived]
-      description: "Provenance of the figures in this response."
-    coverage_complete:
-      type: boolean
-      description: >
-        Whether the requested traversal completed within the available chain
-        and pagination budget. False means reported totals are partial or lower
-        bounds, not that omitted activity did not occur.
-    caveat:
-      type: string
-      description: "Endpoint-specific limitation that consumers should preserve."
-    deposits_usd:
-      type: number
-      description: "USD value of inbound transfers observed in the window."
-    withdrawals_usd:
-      type: number
-      description: "USD value of outbound transfers observed in the window."
-    net_flow_usd:
-      type: number
-    unique_depositors:
-      type: integer
-    transaction_count:
-      type: integer
-    balance_native:
-      type: number
-      description: "Native token balance for a traced address."
-    associations:
-      type: array
-      description: "Casino clusters an address has interacted with in 30 days."
-      items:
-        type: object
-        properties:
-          casino_slug: { type: string }
-          casino_name: { type: string }
-          interactions_30d: { type: integer }
-          cluster_confidence: { type: number }
-    score:
-      type: number
-      minimum: 0
-      maximum: 1
-      description: "Anomaly prioritization score. Higher means more evidence requires review."
-    risk_tier:
-      type: string
-      enum: [insufficient_data, low_risk, elevated_risk, high_risk]
-      description: >
-        Canonical risk label. insufficient_data means the window could not be
-        characterised — too few transfers, or a provider that did not answer. It
-        is NOT a clean result and never sets is_suspicious. No tier asserts that
-        fraud occurred; the vocabulary stops at review priority deliberately,
-        because the miner observes settlement and cannot see intent or identity.
+    tx_hash: { type: string }
+    status: { type: string }
+    block_number: { type: [integer, "null"] }
+    from_address: { type: [string, "null"] }
+    to_address: { type: [string, "null"] }
+    value_wei: { type: string }
+    gas_used: { type: [integer, "null"] }
+    fee_wei: { type: [string, "null"] }
+    address: { type: string }
+    native_balance_wei: { type: [string, "null"] }
+    native_balance: { type: [number, "null"] }
+    token_balances: { type: array }
     risk_score:
       type: number
       minimum: 0
       maximum: 1
-      description: >
-        Bounded, deterministic sum of the screens that fired. Same upstream
-        state always yields the same score.
-    is_suspicious:
-      type: boolean
-      description: >
-        True exactly when risk_tier is elevated_risk or high_risk. Derived from
-        the tier so the boolean, the tier, and the score cannot disagree.
-    signals:
-      type: array
-      items: { type: string }
-      description: "Named screens that fired, each with its measurement."
-    risk_signals:
-      type: array
-      description: >
-        Every screen that ran, fired or not, each with severity, score,
-        measurement, and evidence identifiers. A screen that did not fire still
-        reports what it measured.
-      items:
-        type: object
-        properties:
-          name: { type: string }
-          severity: { type: string, enum: [info, low, medium, high] }
-          score: { type: number }
-          measurement: { type: string }
-          evidence:
-            type: array
-            items: { type: string }
-    native_balance_wei:
-      type: [string, "null"]
-      description: >
-        Native balance in exact base units, as a string. Null — never 0 — when
-        the provider could not be read. A float at wei scale is lossy:
-        999999999999999999 round-trips to a whole unit.
-    block_number:
-      type: [integer, "null"]
-      description: "Block height the balance or transaction read reflects."
-    balance_status:
+    risk_tier:
       type: string
-      enum: [observed, unavailable]
-    association_scan_status:
-      type: string
-      enum: [complete, not_completed_in_budget]
-      description: >
-        Whether the derived 30-day operator-interaction scan finished. Not
-        completed means missing coverage, not zero interactions.
+      enum: [insufficient_data, low_risk, elevated_risk, high_risk]
+    is_suspicious: { type: boolean }
+    risk_signals: { type: array }
+    coverage_complete: { type: boolean }
 
 endpoints:
   - path: /transaction/lookup
     external_path: /transaction/lookup
-    method: POST
-    intents:
-      - ONCHAIN_TX_LOOKUP
-    content_type: application/json
-    description: >
-      ONCHAIN_TX_LOOKUP. Answers "what is the status of transaction
-      0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431",
-      "did this tx hash succeed or revert", "what did transaction 0x... do on
-      base", "how much gas did this transaction use". Takes one transaction
-      hash and returns its direct RPC facts: status (confirmed, reverted,
-      pending, or not_found — all four distinguishable), block number, block
-      hash, block timestamp, transaction index, nonce, from address, to
-      address, value in wei and in native units with the asset symbol, gas
-      limit, gas used, effective gas price, total fee in wei, deployed contract
-      address, method id, and every ERC-20 transfer decoded from the receipt
-      logs with contract, symbol, decimals and exact raw amount. A hash that
-      does not exist returns not_found with confidence 0, never a guess. This
-      is a lookup of one specific transaction; for what an address HOLDS use
-      WALLET_BALANCE_CHECK, and for how risky an address is use
-      FRAUD_DETECTION. Params: tx_hash (required, 0x-prefixed followed by
-      exactly 64 hex characters, for example
-      0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431;
-      also accepted as txHash, hash, transaction_hash or transactionHash),
-      chain (optional, one of ethereum, base, polygon, arbitrum, optimism,
-      bsc, avalanche, default ethereum), query (optional, the original
-      natural-language question — the hash and chain are read out of it when
-      tx_hash is not supplied). JSON body:
-      {"tx_hash": "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431",
-      "chain": "ethereum"}.
-    params:
-      body:
-        required:
-          - name: tx_hash
-            type: string
-            intents: ["*"]
-            description: "Transaction hash to look up: 0x followed by exactly 64 hexadecimal characters. Reject-free example: 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431."
-            example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
-        optional:
-          - name: chain
-            type: string
-            intents: ["*"]
-            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche. Defaults to ethereum when absent."
-            example: "ethereum"
-          - name: query
-            type: string
-            intents: ["*"]
-            description: "The caller's original natural-language question, passed through verbatim. The transaction hash and chain are extracted from it when tx_hash is absent."
-            example: "The transaction hash and chain are extracted from it when tx_hash is absent."
-
-  - path: /transaction/lookup
-    external_path: /transaction/lookup
     method: GET
-    intents:
-      - ONCHAIN_TX_LOOKUP
     description: >
-      ONCHAIN_TX_LOOKUP, identical to the POST form above and taking the same
-      values in the query string instead of a JSON body. Query params: tx_hash
-      (required, 0x-prefixed followed by exactly 64 hex characters; also
-      accepted as hash or txHash), chain (optional, default ethereum), query
-      (optional, natural-language question).
+      ONCHAIN_TX_LOOKUP. Look up one specific EVM transaction by its complete
+      0x-prefixed 64-hex-character hash. Returns confirmed, reverted, pending,
+      or not_found plus sender, recipient, native value, block, gas used,
+      effective gas price, total fee, method identifier, and decoded ERC-20
+      transfers. Use only when the question supplies an actual transaction
+      hash. This is not a wallet-balance or fraud endpoint.
+    intents: [ONCHAIN_TX_LOOKUP]
     params:
       query:
         required:
           - name: tx_hash
             type: string
             intents: ["*"]
-            description: "Transaction hash to look up: 0x followed by exactly 64 hexadecimal characters. Reject-free example: 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431."
+            description: "Required complete EVM transaction hash: 0x followed by exactly 64 hexadecimal characters."
             example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
         optional:
           - name: chain
             type: string
             intents: ["*"]
-            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche. Defaults to ethereum when absent."
-            example: "ethereum"
+            description: "One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche. Omit or send an empty value to use ethereum."
+            example: ethereum
           - name: query
             type: string
             intents: ["*"]
-            description: "The caller's original natural-language question, passed through verbatim. The transaction hash and chain are extracted from it when tx_hash is absent."
-            example: "The transaction hash and chain are extracted from it when tx_hash is absent."
-
-  - path: /wallet/balance
-    external_path: /wallet/balance
-    method: POST
-    intents:
-      - WALLET_BALANCE_CHECK
-    content_type: application/json
-    description: >
-      WALLET_BALANCE_CHECK. Answers "how much ETH does
-      0x974caa59e49682cda0ad2bbe82983419a2ecc400 hold", "what is the balance of
-      vitalik.eth", "what does this address hold on polygon", "how much USDT is
-      in this wallet". Takes one blockchain address or ENS name and returns its
-      current native-coin balance in exact base units (native_balance_wei, a
-      decimal string so wei-scale precision survives) and in human units with
-      the asset symbol, the block height the read reflects, and ERC-20 token
-      balances carrying contract, symbol, decimals, raw and scaled amounts. An
-      ENS name is resolved on-chain through the ENS registry; a name with no
-      resolver returns unresolved_name rather than a balance for some other
-      account. A provider that cannot be read returns null with balance_status
-      "unavailable" and confidence 0 — never a zero balance, which is
-      indistinguishable from a genuinely empty wallet. This answers what an
-      address HOLDS; for one transaction's details use ONCHAIN_TX_LOOKUP, and
-      for how risky an address is use FRAUD_DETECTION. Params: address
-      (required, either 0x-prefixed followed by exactly 40 hex characters for
-      example 0x974caa59e49682cda0ad2bbe82983419a2ecc400, or an ENS name
-      ending .eth for example vitalik.eth, or a native solana, tron or bitcoin
-      address; also accepted as wallet, account or ens), chain (optional, one
-      of ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana,
-      tron, bitcoin, default ethereum), query (optional, the original
-      natural-language question — the address and chain are read out of it
-      when address is not supplied). JSON body:
-      {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
-      "chain": "ethereum"}.
-    params:
-      body:
-        required:
-          - name: address
-            type: string
-            intents: ["*"]
-            description: "The account to read: either 0x followed by exactly 40 hexadecimal characters, or an ENS name ending .eth which is resolved on-chain before the read. Example: 0x974caa59e49682cda0ad2bbe82983419a2ecc400."
-            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
-        optional:
-          - name: chain
-            type: string
-            intents: ["*"]
-            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
-            example: "ethereum"
-          - name: query
-            type: string
-            intents: ["*"]
-            description: "The caller's original natural-language question, passed through verbatim. The address and chain are extracted from it when address is absent."
-            example: "The address and chain are extracted from it when address is absent."
+            description: Original natural-language transaction question, passed through verbatim.
+            example: "Did transaction 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431 succeed on ethereum?"
 
   - path: /wallet/balance
     external_path: /wallet/balance
     method: GET
-    intents:
-      - WALLET_BALANCE_CHECK
     description: >
-      WALLET_BALANCE_CHECK, identical to the POST form above and taking the
-      same values in the query string instead of a JSON body. Query params:
-      address (required, 0x-prefixed 40 hex characters or an ENS name ending
-      .eth; also accepted as wallet), chain (optional, default ethereum),
-      query (optional, natural-language question).
+      WALLET_BALANCE_CHECK. Return the current native-coin and token balances of
+      one specific blockchain address or ENS name on a named chain. The address
+      is required. Returns exact native base units, human-readable native amount,
+      asset symbol, block height, and token balances. An unreadable provider
+      returns unavailable, never a fabricated zero. This endpoint answers what
+      an account currently holds; it does not assess fraud.
+    intents: [WALLET_BALANCE_CHECK]
     params:
       query:
         required:
           - name: address
             type: string
             intents: ["*"]
-            description: "The account to read: either 0x followed by exactly 40 hexadecimal characters, or an ENS name ending .eth which is resolved on-chain before the read. Example: 0x974caa59e49682cda0ad2bbe82983419a2ecc400."
+            description: "Required account: 0x followed by exactly 40 hexadecimal characters, an ENS name ending .eth, or a valid Solana, Tron, or Bitcoin address."
             example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
         optional:
           - name: chain
             type: string
             intents: ["*"]
-            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
-            example: "ethereum"
+            description: "One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Omit or send an empty value to use ethereum."
+            example: ethereum
           - name: query
             type: string
             intents: ["*"]
-            description: "The caller's original natural-language question, passed through verbatim. The address and chain are extracted from it when address is absent."
-            example: "The address and chain are extracted from it when address is absent."
-
-  - path: /wallet/trace
-    external_path: /wallet/trace
-    method: POST
-    intents:
-      - WALLET_BALANCE_CHECK
-    content_type: application/json
-    description: >
-      WALLET_BALANCE_CHECK. The same balance answer as /wallet/balance, under
-      the endpoint's original name, plus a separately labelled attribution
-      layer: which reviewed gambling-operator wallet clusters this address has
-      interacted with in the last 30 days. The balance is the answer and is
-      never delayed by that scan; when the scan does not finish inside its
-      budget the response says association_scan_status
-      "not_completed_in_budget", which means missing coverage and not an
-      observation of zero interactions. Attribution is a reviewed ownership
-      claim about an address, not a statement about a person or about intent.
-      Params: identical to /wallet/balance — address (required, 0x-prefixed 40
-      hex characters or an ENS name ending .eth), chain (optional, default
-      ethereum), query (optional, natural-language question). JSON body:
-      {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
-      "chain": "ethereum"}.
-    params:
-      body:
-        required:
-          - name: address
-            type: string
-            intents: ["*"]
-            description: "The account to read: either 0x followed by exactly 40 hexadecimal characters, or an ENS name ending .eth which is resolved on-chain before the read. Example: 0x974caa59e49682cda0ad2bbe82983419a2ecc400."
-            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
-        optional:
-          - name: chain
-            type: string
-            intents: ["*"]
-            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
-            example: "ethereum"
-          - name: query
-            type: string
-            intents: ["*"]
-            description: "The caller's original natural-language question, passed through verbatim. The address and chain are extracted from it when address is absent."
-            example: "The address and chain are extracted from it when address is absent."
-
-  - path: /anomaly/check
-    external_path: /anomaly/check
-    method: POST
-    intents:
-      - FRAUD_DETECTION
-    content_type: application/json
-    description: >
-      FRAUD_DETECTION. Answers "how likely is
-      0x974caa59e49682cda0ad2bbe82983419a2ecc400 to be fraudulent", "is this
-      address risky", "is it safe to receive funds from this wallet", "does
-      this address show suspicious activity", "how likely is transaction
-      0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431 to be
-      fraudulent". Assesses how likely a specific on-chain address is to be
-      fraudulent from bounded, observable transfer evidence. Given a
-      transaction hash instead, it reports that transaction's facts and
-      assesses the observable behaviour of its SENDER, and says so explicitly:
-      the chain records no intent, so a verdict on a transaction itself is not
-      something this or any miner can read off it. Runs five named screens — round-trip return, transfer
-      velocity, counterparty concentration, dust fan-in and repeated identical
-      amounts — and returns risk_tier (one of insufficient_data, low_risk,
-      elevated_risk, high_risk), a bounded deterministic risk_score between 0
-      and 1, is_suspicious, and every screen's measurement whether or not it
-      fired, so a low-risk answer carries the same evidence a high-risk one
-      would. Counterparties that are known exchanges, bridges, DEX routers or
-      reviewed gambling-operator clusters are identified and mitigate the
-      screens ordinary settlement trips by construction, so routine exchange
-      activity is not reported as fraud. An address with too little history to
-      characterise returns insufficient_data, never low_risk. Coverage is
-      on-chain addresses on the listed chains; a question about a named
-      company, brand, scheme or other off-chain entity is outside what this
-      miner can observe and is answered with verdict "out_of_coverage" and
-      confidence 0, naming what would make the question answerable, rather than
-      guessed. A malformed request is instead "invalid_input" — this miner's
-      limit and the caller's mistake are never conflated. Nothing here asserts that fraud occurred — the tiers rank review
-      priority from observable transfer patterns and infer no identity or
-      intent. Params: address (required, 0x-prefixed followed by exactly 40 hex
-      characters for example 0x974caa59e49682cda0ad2bbe82983419a2ecc400, or an
-      ENS name ending .eth; also accepted as wallet or account), chain
-      (optional, one of ethereum, base, polygon, arbitrum, optimism, bsc,
-      avalanche, solana, tron, bitcoin, default ethereum), hours (optional,
-      integer between 1 and 720, default 24), tx_hash (optional, 0x-prefixed
-      followed by exactly 64 hex characters — assess the parties to one
-      transaction instead of an address; also accepted as txHash or hash),
-      query (optional, the original natural-language question — the address,
-      transaction hash, chain and lookback window are read out of it when the
-      explicit field is not supplied). JSON body:
-      {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400",
-      "chain": "ethereum", "hours": 24}.
-    params:
-      body:
-        required:
-          - name: address
-            type: string
-            intents: ["*"]
-            description: "The account to read: either 0x followed by exactly 40 hexadecimal characters, or an ENS name ending .eth which is resolved on-chain before the read. Example: 0x974caa59e49682cda0ad2bbe82983419a2ecc400."
-            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
-        optional:
-          - name: chain
-            type: string
-            intents: ["*"]
-            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
-            example: "ethereum"
-          - name: hours
-            type: integer
-            intents: ["*"]
-            description: "Lookback window in hours over which transfer behaviour is screened. Integer between 1 and 720 inclusive. Defaults to 24 when absent."
-            example: "24"
-          - name: tx_hash
-            type: string
-            intents: ["*"]
-            description: "Assess the SENDER of this transaction instead of a bare address: 0x followed by exactly 64 hexadecimal characters. Supply either address or tx_hash, not both; address wins when both are present. Example: 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431."
-            example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
-          - name: query
-            type: string
-            intents: ["*"]
-            description: "The caller's original natural-language question, passed through verbatim. The address, transaction hash, chain and lookback window are extracted from it when the explicit field is absent."
-            example: "The address, transaction hash, chain and lookback window are extracted from it when the explicit field is absent."
+            description: Original natural-language balance question, passed through verbatim.
+            example: "How much ETH does 0x974caa59e49682cda0ad2bbe82983419a2ecc400 hold?"
 
   - path: /anomaly/check
     external_path: /anomaly/check
     method: GET
-    intents:
-      - FRAUD_DETECTION
     description: >
-      FRAUD_DETECTION, identical to the POST form above and taking the same
-      values in the query string instead of a JSON body. Query params: address
-      (required, 0x-prefixed 40 hex characters or an ENS name ending .eth;
-      also accepted as wallet), chain (optional, default ethereum), hours
-      (optional, 1 to 720, default 24), query (optional, natural-language
-      question).
+      FRAUD_DETECTION. Assess how likely the specific entity, transaction, or
+      action named in the required natural-language query is to be fraudulent.
+      For an on-chain address, screen round-trip returns, transfer velocity,
+      counterparty concentration, dust fan-in, and repeated identical amounts.
+      For a transaction hash, screen its sender and return transaction context.
+      Named off-chain subjects are reported out_of_coverage rather than guessed.
+      Returns a bounded risk_score, risk_tier, concise verdict, and measurements.
+    intents: [FRAUD_DETECTION]
     params:
       query:
         required:
-          - name: address
-            type: string
-            intents: ["*"]
-            description: "The account to read: either 0x followed by exactly 40 hexadecimal characters, or an ENS name ending .eth which is resolved on-chain before the read. Example: 0x974caa59e49682cda0ad2bbe82983419a2ecc400."
-            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
-        optional:
-          - name: chain
-            type: string
-            intents: ["*"]
-            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum when absent."
-            example: "ethereum"
-          - name: hours
-            type: integer
-            intents: ["*"]
-            description: "Lookback window in hours over which transfer behaviour is screened. Integer between 1 and 720 inclusive. Defaults to 24 when absent."
-            example: "24"
-          - name: tx_hash
-            type: string
-            intents: ["*"]
-            description: "Assess the SENDER of this transaction instead of a bare address: 0x followed by exactly 64 hexadecimal characters. Supply either address or tx_hash, not both; address wins when both are present. Example: 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431."
-            example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
           - name: query
             type: string
             intents: ["*"]
-            description: "The caller's original natural-language question, passed through verbatim. The address, transaction hash, chain and lookback window are extracted from it when the explicit field is absent."
-            example: "The address, transaction hash, chain and lookback window are extracted from it when the explicit field is absent."
-
-  - path: /casino/stats
-    external_path: /casino/stats
-    method: POST
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Measures observed inbound and outbound transfer volume, unique inbound
-      counterparties, transaction count, chains, and net directional flow around
-      a reviewed operator wallet cluster. This is a settlement-rail observation,
-      not a wager, revenue, deposit, withdrawal, or profit-and-loss feed.
-      REQUEST: {"slug": "stake", "hours": 24}
-      RESPONSE: {"slug": "stake", "deposits_usd": 2672237.51,
-      "withdrawals_usd": 772038.14, "net_flow_usd": 1900199.37,
-      "unique_depositors": 308, "transaction_count": 408, "confidence": 0.93,
-      "verdict": "net_inflow", "reasoning": "...", "data_source": "live"}
-
-  - path: /casino/ranking
-    external_path: /casino/ranking
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Ranks only operators with attributed wallet coverage by observed inbound
-      USD transfer flow. Includes tracked-flow share, counterparties, outbound
-      flow, and confidence. Catalogued operators without reviewed attribution are
-      excluded from the ranking and remain visible through /casinos and /coverage.
-      REQUEST: query param ?hours=168
-      RESPONSE: {"window_hours": 168, "count": 2, "ranking": [{"rank": 1,
-      "slug": "stake", "deposits_usd": 24567436.62, "market_share_pct": 66.53,
-      "unique_depositors": 3077}], "confidence": 0.9, "verdict": "leader:stake",
-      "reasoning": "...", "data_source": "live"}
-
-  - path: /casinos
-    external_path: /casinos
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Public registry of catalogued gambling operators, reviewed wallet claims,
-      evidence status, supported chains, and explicit attributed versus unobserved
-      coverage. This is the discovery endpoint for understanding what other
-      flow endpoints can actually measure.
-      REQUEST: no parameters
-      RESPONSE: {"count": 2, "casinos": [{"slug": "stake", "name": "Stake.com",
-      "licensed_in": "Curaçao", "wallet_count": 2, "chains": ["ethereum"]}]}
-
-  - path: /market/networks
-    external_path: /market/networks
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Observed flow split by chain across attributed operator clusters.
-      REQUEST: query param ?hours=168
-      RESPONSE: {"window_hours": 168, "chains": [{"chain": "ethereum",
-      "inbound_usd": 3391190.0, "outbound_usd": 1582479.0,
-      "share_of_observed_inbound_pct": 100.0, "transfers": 1606}],
-      "confidence": 0.55, "verdict": "lead_chain:ethereum", "reasoning": "...",
-      "data_source": "live"}
-
-  - path: /market/assets
-    external_path: /market/assets
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Asset composition of observed flow. Optional ?slug= scopes it to one
-      operator. Reports stablecoin share, a genuine behavioural signal.
-      REQUEST: query params ?hours=168&slug=stake
-      RESPONSE: {"assets": [{"symbol": "USDC", "inbound_usd": 2028000.0,
-      "share_of_observed_inbound_pct": 59.9, "is_stablecoin": true}],
-      "stablecoin_share_pct": 82.0, "confidence": 0.55, "verdict":
-      "top_asset:USDC", "reasoning": "...", "data_source": "live"}
-
-  - path: /market/large-transfers
-    external_path: /market/large-transfers
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Individual transfers above a USD threshold touching an attributed
-      cluster. Each row is one verifiable transaction hash.
-      REQUEST: query params ?hours=24&min_usd=100000&limit=50
-      RESPONSE: {"count": 6, "transfers": [{"tx_hash": "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431",
-      "chain": "ethereum", "operator_slug": "rollbit", "direction": "inbound",
-      "token": "USDC", "usd_value": 600001.0, "timestamp": "..."}],
-      "confidence": 0.55, "verdict": "6_transfers_above_threshold",
-      "reasoning": "...", "data_source": "live"}
-
-  - path: /operator/{slug}/series
-    external_path: /operator/{slug}/series
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Bucketed inbound/outbound flow series for one operator. Unattributed
-      operators return verdict "not_attributed" with confidence 0 — explicitly
-      unobserved rather than zero.
-      REQUEST: path slug, query params ?hours=168&bucket_hours=4
-      RESPONSE: {"slug": "stake", "points": 42, "series": [{"t": "...",
-      "inbound_usd": 722098.0, "outbound_usd": 19.0, "transfers": 435}],
-      "confidence": 0.55, "verdict": "42_buckets", "reasoning": "...",
-      "data_source": "live"}
-
-  - path: /operator/{slug}/counterparties
-    external_path: /operator/{slug}/counterparties
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Counterparty concentration for an operator. High top-10 share indicates
-      routing or bridge activity rather than broad user behaviour.
-      REQUEST: path slug, query params ?hours=168&top=20
-      RESPONSE: {"slug": "stake", "distinct_counterparties": 719,
-      "top10_share_of_observed_flow_pct": 77.03, "counterparties":
-      [{"address": "0xdfd5293d8e347dfe59e90efd55b2956a1343963d", "total_usd": 425999.0,
-      "share_of_observed_flow_pct": 30.52}], "confidence": 0.55,
-      "reasoning": "...", "data_source": "live"}
-
-  - path: /coverage
-    external_path: /coverage
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      What the miner can and cannot see. Distinguishes attributed operators
-      (produce figures) from catalogued-but-unobserved ones (produce nothing,
-      never a zero). Consumers should weight all other figures through this.
-      REQUEST: no parameters
-      RESPONSE: {"operators_catalogued": 22, "operators_attributed": 5,
-      "operators_unattributed": 17, "wallet_clusters": 6, "chains_covered":
-      ["ethereum"], "caveat": "...", "confidence": 1.0, "data_source": "registry"}
-
-  - path: /player/evaluate
-    external_path: /player/evaluate
-    method: POST
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Evaluate one address against every attributed operator cluster. Returns
-      value sent to and received from operators, net position, per-operator
-      exposure, and a behavioural classification (individual_candidate,
-      one_directional, infrastructure, operator_wallet, low_activity).
-      Net position is settlement direction, NOT gambling profit and loss —
-      balances held inside an operator are invisible and non-wager flows such as
-      affiliate payouts are indistinguishable from winnings.
-      REQUEST: {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400", "chain": "ethereum", "hours": 720}
-      RESPONSE: {"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400", "sent_to_operators_usd": 316881.0,
-      "received_from_operators_usd": 316879.0, "net_position_usd": -2.0,
-      "transfers_with_operators": 3, "operators_touched": 1, "exposures": [...],
-      "entity_class": "individual_candidate", "behaviour_flags": [...],
-      "confidence": 0.5, "verdict": "net_negative", "reasoning": "...",
-      "data_source": "live"}
-
-  - path: /players/leaderboard
-    external_path: /players/leaderboard
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Counterparties ranked by net observed position across attributed operator
-      clusters, derived from settlement rather than scraped bet feeds. Only
-      addresses showing bidirectional flow are ranked; one-directional and
-      infrastructure addresses are classified out and reported separately.
-      REQUEST: query params ?hours=168&limit=25&include_infrastructure=false
-      RESPONSE: {"addresses_observed": 4717, "class_counts": {...},
-      "individual_candidates": 3, "one_directional_excluded": 1147,
-      "infrastructure_excluded": 10, "net_positive": [...], "net_negative": [...],
-      "largest_one_directional": [...], "methodology": "...", "confidence": 0.55,
-      "data_source": "live"}
-
-  - path: /attribution/discover/{slug}
-    external_path: /attribution/discover/{slug}
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Propose candidate sibling wallets for an already-attributed operator,
-      ranked by on-chain evidence (bidirectional cluster flow, counterparty
-      overlap, hub shape, transfer cadence). Returns a REVIEW QUEUE — behaviour
-      consistent with an operator wallet never proves ownership, and nothing is
-      added to the registry automatically.
-      REQUEST: path slug, query params ?hours=720&limit=10
-      RESPONSE: {"slug": "stake", "counterparties_examined": 3326,
-      "candidates": [{"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400", "strength": 0.45,
-      "recommended_status": "unverified_seed", "review_required": true,
-      "evidence": {...}, "signals": [...]}], "confidence": 0.6,
-      "verdict": "6_candidates_0_strong", "reasoning": "...",
-      "data_source": "derived"}
-
-  - path: /attribution/discover
-    external_path: /attribution/discover
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Run candidate discovery across every attributed operator at once.
-      REQUEST: query params ?hours=720&per_operator=5
-      RESPONSE: {"operators_expanded": 5, "candidates_proposed": 24,
-      "strong_candidates": 0, "by_operator": [...], "confidence": 0.6,
-      "reasoning": "...", "data_source": "derived"}
-
-  - path: /operator/{slug}/treasury
-    external_path: /operator/{slug}/treasury
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Current on-chain holdings across an operator's attributed clusters —
-      native balance plus ERC20 token balances, priced to USD with an asset
-      breakdown. Balances, not flow. NOT a solvency statement: player
-      liabilities are off-chain and unattributed wallets are invisible.
-      REQUEST: path slug
-      RESPONSE: {"slug": "stake", "total_usd": 8693715.0,
-      "stablecoin_share_pct": 0.0, "distinct_assets": 1,
-      "holdings": [{"symbol": "ETH", "amount": 4577.66, "usd_value": 8693669.0,
-      "share_pct": 100.0}], "wallets": [...], "confidence": 0.55,
-      "verdict": "reserves:8693715", "reasoning": "...", "data_source": "live"}
-
-  - path: /market/treasury
-    external_path: /market/treasury
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      All attributed operators ranked by observed on-chain reserves, with
-      stablecoin share and share of observed reserves.
-      REQUEST: no parameters
-      RESPONSE: {"operators": [{"rank": 1, "slug": "stake",
-      "total_usd": 8693715.0, "share_of_observed_reserves_pct": 99.79}],
-      "total_observed_usd": 8711612.0, "operators_read": 5, "confidence": 0.55,
-      "verdict": "leader:stake", "reasoning": "...", "data_source": "live"}
-
-  - path: /market/providers
-    external_path: /market/providers
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Infrastructure providers ranked by casino flow carried, with rising and
-      falling trend versus the prior equal window. These are the bridges,
-      exchange hot wallets, and routing contracts that move value in and out of
-      operator wallets. NOT game providers — a wager settles inside an
-      operator's ledger and leaves no on-chain record attributing it to a game
-      studio, so game-provider ranking is not derivable from chain data.
-      REQUEST: query params ?hours=168&limit=25
-      RESPONSE: {"ranked": [{"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400", "label": "Binance 14",
-      "category": "exchange", "flow_usd": 22816040.0, "trend": "falling",
-      "change_pct": -18.2, "operators_served": 1,
-      "share_of_rail_flow_pct": 59.99}], "trending": [...], "categories": [...],
-      "confidence": 0.55, "verdict": "top_rail:Binance 14", "data_source": "live"}
-
-  - path: /players/cohorts
-    external_path: /players/cohorts
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Value segments, new-versus-returning retention, and flow concentration
-      across every observed counterparty. Broader than the net-position board:
-      it covers all addresses, not only those with a round trip.
-      REQUEST: query param ?hours=168
-      RESPONSE: {"addresses_active": 4426, "new_this_period": 2535,
-      "returning": 1891, "retention_pct": 42.72, "segments": [{"segment": "mega",
-      "addresses": 7, "share_of_gross_pct": 76.0}], "concentration":
-      {"top_10_share_pct": 79.2}, "confidence": 0.55, "data_source": "live"}
-
-  - path: /players/overlap
-    external_path: /players/overlap
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Addresses transacting with more than one attributed operator — a shared
-      audience signal. Overlap is a floor, not a customer count: one person may
-      use several addresses.
-      REQUEST: query param ?hours=168
-      RESPONSE: {"addresses_observed": 4426, "multi_operator_addresses": 12,
-      "overlap_pct": 0.27, "operator_pairs": [{"operator_a": "stake",
-      "operator_b": "rollbit", "shared_addresses": 8, "jaccard_pct": 0.19}],
-      "confidence": 0.55, "data_source": "live"}
-
-  - path: /health/registry
-    external_path: /health/registry
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Health of every attributed operator's wallet claims. Distinguishes an
-      address that is genuinely quiet in the window from one that is dormant,
-      and from one that has NO transfer history at all — a wrong label rather
-      than an operator with no volume. Consumers should treat figures for
-      non-reportable operators as absent, not zero.
-      REQUEST: query param ?hours=168
-      RESPONSE: {"operators_attributed": 4, "operators_reportable": 2,
-      "by_attribution_status": {"healthy": 1, "partial": 1, "stale": 2},
-      "dead_labels": [], "operators": [...], "confidence": 0.9,
-      "verdict": "2/4_reportable", "data_source": "live"}
-
-  - path: /health/operator/{slug}
-    external_path: /health/operator/{slug}
-    method: GET
-    description: >
-      Product and catalog endpoint for the DegenLens application, NOT an
-      intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or
-      FRAUD_DETECTION here.
-      Wallet-claim health for one operator, per address: lifetime activity,
-      last-seen timestamp, and a status of active, quiet, dormant, or dead.
-      REQUEST: path slug, query param ?hours=168
-      RESPONSE: {"slug": "stake", "attribution_status": "partial",
-      "coverage_quality": "partial", "active_claims": 1, "total_claims": 1,
-      "reportable": true, "wallets": [{"address": "0x974caa59e49682cda0ad2bbe82983419a2ecc400", "status": "active",
-      "lifetime_transfers": 200, "days_since_activity": 0.01}],
-      "confidence": 0.9, "data_source": "live"}
+            description: "Required complete fraud question naming the entity, address, transaction, or action to assess."
+            example: "How likely is 0x974caa59e49682cda0ad2bbe82983419a2ecc400 to be fraudulent on ethereum?"
+        optional:
+          - name: address
+            type: string
+            intents: ["*"]
+            description: Explicit address or ENS name. Takes precedence over an address extracted from query.
+            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+          - name: tx_hash
+            type: string
+            intents: ["*"]
+            description: "Explicit transaction subject: 0x followed by exactly 64 hexadecimal characters. The sender is screened."
+            example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Omit or send an empty value to use ethereum."
+            example: ethereum
+          - name: hours
+            type: integer
+            intents: ["*"]
+            description: Lookback window from 1 to 720 hours. Defaults to 24.
+            example: 24
 
 semantics:
   signal_mapping:
@@ -910,14 +210,3 @@ semantics:
     - ONCHAIN_TX_LOOKUP
     - WALLET_BALANCE_CHECK
     - FRAUD_DETECTION
-
-# NOTE: no `on_chain` block.
-#
-# DegenMiner serves pure inference over HTTP — it does not publish results into
-# ERC-8183 jobs or on-chain callbacks, so the on_chain mapping is not required.
-# The floor price is set in the on-chain registration transaction instead.
-#
-# Including a partial on_chain block would be invalid (`on_chain.transform` is
-# mandatory once the block exists), and a full one adds ERC-8183 request-mapping
-# surface that would have to be kept correct for no current benefit. Add it only
-# if this miner later needs to be callable from a smart contract.

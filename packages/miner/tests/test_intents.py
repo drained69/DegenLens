@@ -881,7 +881,7 @@ def test_declared_required_params_are_the_ones_the_route_actually_needs():
         "/transaction/lookup": "tx_hash",
         "/wallet/balance": "address",
         "/wallet/trace": "address",
-        "/anomaly/check": "address",
+        "/anomaly/check": "query",
     }
     for endpoint in MANIFEST["endpoints"]:
         if not endpoint.get("intents"):
@@ -908,6 +908,8 @@ def test_declared_chain_values_are_all_actually_served():
     offers must be one the miner actually serves."""
     seen = 0
     for endpoint in MANIFEST["endpoints"]:
+        if not endpoint.get("intents"):
+            continue
         for groups in (endpoint.get("params") or {}).values():
             for group in ("required", "optional"):
                 for entry in groups.get(group, []):
@@ -921,7 +923,39 @@ def test_declared_chain_values_are_all_actually_served():
                         f"this miner does not serve"
                     )
                     seen += 1
-    assert seen == 7, f"expected a chain param on 7 intent endpoints, found {seen}"
+    assert seen == 3, f"expected a chain param on 3 intent endpoints, found {seen}"
+
+
+def test_empty_optional_chain_uses_documented_default(offline):
+    """The request builder serialises omitted optional params as empty strings."""
+    tx_hash = "0x" + "1" * 64
+    response = client.get(
+        "/transaction/lookup",
+        params={"tx_hash": tx_hash, "chain": "", "query": ""},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["chain"] == "ethereum"
+    assert payload["verdict"] != "invalid_input"
+
+
+def test_get_fraud_route_accepts_transaction_subject(offline):
+    """The GET route must accept every subject its manifest advertises."""
+    tx_hash = "0x" + "1" * 64
+    response = client.get(
+        "/anomaly/check",
+        params={
+            "query": f"how likely is transaction {tx_hash} to be fraudulent?",
+            "tx_hash": tx_hash,
+            "chain": "",
+            "hours": "",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["chain"] == "ethereum"
+    assert payload.get("tx_hash") == tx_hash or payload.get("transaction", {}).get("tx_hash") == tx_hash
+    assert payload["verdict"] != "invalid_input"
 
 
 def test_no_param_declares_accepted_fields_as_a_list():
@@ -995,7 +1029,7 @@ def test_manifest_request_contract_is_accepted_by_the_route(offline, include_opt
             f"malformed: {payload}"
         )
         checked += 1
-    assert checked == 7, f"expected 7 intent endpoints, exercised {checked}"
+    assert checked == 3, f"expected 3 intent endpoints, exercised {checked}"
 
 
 def test_every_declared_chain_is_accepted_on_every_intent_endpoint(offline):

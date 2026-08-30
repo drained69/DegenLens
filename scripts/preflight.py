@@ -41,7 +41,7 @@ VALID_TOP_LEVEL = REQUIRED_TOP_LEVEL | {
 }
 VALID_ENDPOINT_KEYS = {
     "path", "external_path", "method", "description", "endpoint_base_url",
-    "content_type", "multipart_fields", "param_map",
+    "content_type", "multipart_fields", "param_map", "intents", "params",
 }
 VALID_LIMITATION_PROPERTIES = {"size_bytes", "value", "length", "count"}
 VALID_LIMITATION_OPERATORS = {"lte", "gte", "lt", "gt", "eq"}

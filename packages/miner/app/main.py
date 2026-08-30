@@ -413,6 +413,11 @@ def _normalize_chain(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     cleaned = value.strip().lower()
+    # The request builder serialises missing optional query parameters as empty
+    # strings. Treat that exactly like omission so `chain=` gets the documented
+    # Ethereum default instead of failing Pydantic's chain pattern.
+    if not cleaned:
+        return "ethereum"
     return _CHAIN_ALIASES.get(cleaned, cleaned)
 
 
@@ -1681,14 +1686,19 @@ async def wallet_balance_get(
 async def anomaly_check_get(
     address: str | None = None,
     wallet: str | None = None,
+    tx_hash: str | None = None,
+    hash: str | None = None,
+    txHash: str | None = None,
     chain: str = "ethereum",
-    hours: int = 24,
+    hours: int | str | None = 24,
     query: str | None = None,
 ) -> dict[str, Any]:
+    normalized_hours = 24 if hours in (None, "") else hours
     return await anomaly_check_endpoint(
         AnomalyRequest.model_validate({
             "address": address or wallet, "chain": chain,
-            "hours": hours, "query": query,
+            "tx_hash": tx_hash or hash or txHash,
+            "hours": normalized_hours, "query": query,
         })
     )
 

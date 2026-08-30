@@ -975,9 +975,17 @@ def test_declared_required_params_are_the_ones_the_route_actually_needs():
         required = {
             e["name"] for e in endpoint["params"][location].get("required", [])
         }
-        assert required == {identifier[endpoint["path"]]}, (
-            f"{endpoint['path']} requires {sorted(required)}, expected "
-            f"exactly {identifier[endpoint['path']]!r}"
+        # The identifier must be required. `query` is required alongside it --
+        # see test_query_is_declared_required_everywhere_the_engine_reads --
+        # and nothing else may be, since a required `chain` or `hours` would
+        # let the engine treat a call it cannot fully populate as unbuildable.
+        assert identifier[endpoint["path"]] in required, (
+            f"{endpoint['path']} requires {sorted(required)}, which does not "
+            f"include its identifier {identifier[endpoint['path']]!r}"
+        )
+        assert required <= {identifier[endpoint["path"]], "query"}, (
+            f"{endpoint['path']} requires {sorted(required)}; only the "
+            f"identifier and `query` may be required"
         )
 
 
@@ -1255,3 +1263,64 @@ def test_transaction_answer_leads_with_the_outcome(monkeypatch):
             f"answer to {q!r} does not lead with the outcome: {reasoning[:90]}"
         )
         assert "For transaction" not in reasoning, "preamble reintroduced"
+
+
+def test_query_is_declared_required_everywhere_the_engine_reads():
+    """The engine sends only the params the manifest declares.
+
+    Rank-1 operator, confirmed by measurement: the raw question is never
+    forwarded unless the miner declares `q` or `query`. Our answers are
+    written to address the question actually asked, so this field is the
+    difference between 0.998 (6/6) and 0.505 (3/6) on ONCHAIN_TX_LOOKUP
+    against its verified champion. Optional was not enough -- it has to be
+    required, in `input_schema` (which is what the engine builds the call
+    from) and on every endpoint.
+    """
+    assert "query" in (MANIFEST["input_schema"].get("required") or []), (
+        "input_schema does not require `query`, so the engine may never send it"
+    )
+    assert "query" in MANIFEST["input_schema"]["properties"]
+    for endpoint in MANIFEST["endpoints"]:
+        if not endpoint.get("intents"):
+            continue
+        location = "body" if endpoint["method"] == "POST" else "query"
+        required = {p["name"] for p in endpoint["params"][location].get("required", [])}
+        assert "query" in required, (
+            f"{endpoint['method']} {endpoint['path']} leaves `query` optional; "
+            f"the engine may omit it and the answer falls back to a generic summary"
+        )
+
+
+def test_no_engine_plausible_request_is_answered_with_a_non_2xx():
+    """A non-2xx is a guaranteed zero.
+
+    Rank-1 operator: the engine stores an empty answer and the scorer never
+    reads the body, so a 422 from request validation does not score badly --
+    it scores nothing at all. Every malformed, missing-field, wrong-case and
+    out-of-range request the engine could plausibly build must still come back
+    200 carrying the three signal fields, however unhelpful the answer is.
+    """
+    probes = [
+        ("/transaction/lookup", {}),
+        ("/transaction/lookup", {"query": "did it succeed"}),
+        ("/transaction/lookup", {"txHash": TX["hash"]}),
+        ("/transaction/lookup", {"tx_hash": "0xdeadbeef"}),
+        ("/transaction/lookup", {"tx_hash": TX["hash"], "chain": "Ethereum Mainnet"}),
+        ("/transaction/lookup", {"tx_hash": TX["hash"], "unknown_param": "x"}),
+        ("/wallet/balance", {}),
+        ("/wallet/balance", {"address": "notanaddress"}),
+        ("/wallet/balance", {"address": STAKE_HOT, "chain": "Solana"}),
+        ("/anomaly/check", {}),
+        ("/anomaly/check", {"address": STAKE_HOT, "hours": 99999}),
+        ("/anomaly/check", {"address": STAKE_HOT, "hours": "abc"}),
+        ("/anomaly/check", {"query": "is this address fraudulent"}),
+    ]
+    for path, params in probes:
+        r = client.get(path, params=params)
+        assert r.status_code == 200, (
+            f"GET {path} {params} returned {r.status_code}: a non-2xx is a "
+            f"guaranteed zero, not a low score"
+        )
+        body = r.json()
+        for field in ("confidence", "verdict", "reasoning"):
+            assert field in body, f"GET {path} {params} answered without {field!r}"

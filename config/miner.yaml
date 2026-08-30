@@ -34,6 +34,8 @@ circuit_cooldown_seconds: 30
 
 input_schema:
   type: object
+  required:
+    - query
   description: >
     Supply the identifier required by the selected endpoint. Explicit fields
     take precedence over values extracted from query.
@@ -47,7 +49,13 @@ input_schema:
       description: EVM address, ENS name, or supported native-chain address.
     query:
       type: string
-      description: Original natural-language question.
+      description: >
+        The caller's original natural-language question, passed through
+        verbatim and unmodified. Always send this. The answer is written to
+        address the question that was actually asked, so the same subject
+        yields a different answer for "did this transaction succeed", "which
+        block was it mined in" and "how much gas did it use". Without it the
+        endpoint can only return its generic summary.
     chain:
       type: string
       enum: [ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin]
@@ -124,18 +132,18 @@ endpoints:
             intents: ["*"]
             description: "Required complete EVM transaction hash: 0x followed by exactly 64 hexadecimal characters."
             example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
-        optional:
-          - name: chain
-            type: string
-            intents: ["*"]
-            description: "One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche. Omit or send an empty value to use ethereum."
-            example: ethereum
           - name: query
             type: string
             intents: ["*"]
             description: Original natural-language transaction question, passed through verbatim.
             example: "Did transaction 0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431 succeed on ethereum?"
 
+        optional:
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche. Omit or send an empty value to use ethereum."
+            example: ethereum
   - path: /wallet/balance
     external_path: /wallet/balance
     method: GET
@@ -155,18 +163,18 @@ endpoints:
             intents: ["*"]
             description: "Required account: 0x followed by exactly 40 hexadecimal characters, an ENS name ending .eth, or a valid Solana, Tron, or Bitcoin address."
             example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
-        optional:
-          - name: chain
-            type: string
-            intents: ["*"]
-            description: "One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Omit or send an empty value to use ethereum."
-            example: ethereum
           - name: query
             type: string
             intents: ["*"]
             description: Original natural-language balance question, passed through verbatim.
             example: "How much ETH does 0x974caa59e49682cda0ad2bbe82983419a2ecc400 hold?"
 
+        optional:
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Omit or send an empty value to use ethereum."
+            example: ethereum
   - path: /anomaly/check
     external_path: /anomaly/check
     method: GET

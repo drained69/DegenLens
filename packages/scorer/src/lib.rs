@@ -371,7 +371,7 @@ pub unsafe extern "C" fn dealloc(_ptr: i32, _size: i32) {}
 /// can be traced back to the configuration it was measured with. Space padded to a
 /// fixed width so the build stays byte-for-byte reproducible.
 #[unsafe(no_mangle)]
-pub static TELEGRAPH_INTENT: [u8; 32] = *b"ONCHAIN_TX_LOOKUP               ";
+pub static TELEGRAPH_INTENT: [u8; 32] = *b"FRAUD_DETECTION                 ";
 
 // ---------------------------------------------------------------------------
 // Byte-level primitives
@@ -1516,6 +1516,13 @@ const AUTH_POS: &[u32] = &[
     h(b"safe"),
     h(b"legitimate"),
     h(b"organic"),
+    h(b"normal"),
+    h(b"routine"),
+    h(b"compliant"),
+    h(b"transparent"),
+    h(b"minimal"),
+    h(b"clear"),
+    h(b"clean"),
 ];
 const AUTH_NEG: &[u32] = &[
     h(b"ai"),
@@ -1534,6 +1541,13 @@ const AUTH_NEG: &[u32] = &[
     h(b"laundering"),
     h(b"wash"),
     h(b"exploit"),
+    h(b"scam"),
+    h(b"scammy"),
+    h(b"risky"),
+    h(b"flagged"),
+    h(b"red"),
+    h(b"elevated"),
+    h(b"high"),
     h(b"deepfake"),
     h(b"bot"),
 ];

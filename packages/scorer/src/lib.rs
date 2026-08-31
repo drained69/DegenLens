@@ -392,7 +392,24 @@ pub unsafe extern "C" fn dealloc(_ptr: i32, _size: i32) {}
 /// can be traced back to the configuration it was measured with. Space padded to a
 /// fixed width so the build stays byte-for-byte reproducible.
 #[unsafe(no_mangle)]
+#[cfg(intent_otx)]
 pub static TELEGRAPH_INTENT: [u8; 32] = *b"ONCHAIN_TX_LOOKUP               ";
+
+#[unsafe(no_mangle)]
+#[cfg(intent_fraud)]
+pub static TELEGRAPH_INTENT: [u8; 32] = *b"FRAUD_DETECTION                 ";
+
+#[unsafe(no_mangle)]
+#[cfg(intent_research)]
+pub static TELEGRAPH_INTENT: [u8; 32] = *b"RESEARCH_SYNTHESIS              ";
+
+#[unsafe(no_mangle)]
+#[cfg(intent_text)]
+pub static TELEGRAPH_INTENT: [u8; 32] = *b"TEXT_GENERATION                 ";
+
+#[unsafe(no_mangle)]
+#[cfg(intent_web)]
+pub static TELEGRAPH_INTENT: [u8; 32] = *b"WEB_SEARCH                      ";
 
 // ---------------------------------------------------------------------------
 // Byte-level primitives

@@ -75,8 +75,13 @@ dist/
 !packages/scorer/dist/
 packages/scorer/dist/*
 !packages/scorer/dist/degenlens_onchain_tx_lookup_v14.wasm
+!packages/scorer/dist/degenlens_onchain_tx_lookup_v15.wasm
+!packages/scorer/dist/degenlens_research_synthesis_v1.wasm
+!packages/scorer/dist/degenlens_text_generation_v1.wasm
+!packages/scorer/dist/degenlens_web_search_v1.wasm
 !packages/scorer/dist/degenlens_fraud_detection_v10.wasm
 !packages/scorer/dist/degenlens_fraud_detection_v11.wasm
+!packages/scorer/dist/degenlens_fraud_detection_v12.wasm
 !packages/scorer/dist/degenlens_wallet_balance_check_v2.wasm
 .next/
 *.tsbuildinfo

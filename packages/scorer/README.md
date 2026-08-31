@@ -14,6 +14,42 @@ also avoids the near-1 `f32` ties caused by smoothstep's zero slope at 1.
 | `dist/degenlens_fraud_detection_v10.wasm` | `FRAUD_DETECTION` | reg 1852, `frq_c65.wasm` | 0.9985664 | `8a36b09b2eb2313b1d6465bc6aa911b730dbad1c943f38d5d57348fca8502dc3` |
 | `dist/degenlens_wallet_balance_check_v2.wasm` | `WALLET_BALANCE_CHECK` | reg 1066, `wl_penstep40.wasm` | 0.7821707 | `2947266b34e4606c0fbb1e4e44bf6da1146ab298bf6a6c02736d48b9348272ec` |
 
+### Latency-safe OTX candidate
+
+`dist/degenlens_onchain_tx_lookup_v15.wasm` is built from the local bounded
+lexical scorer and is the artifact to use for `ONCHAIN_TX_LOOKUP` fixture
+evaluation. The champion-derived v14 embeds a roughly 24 MB transformer and
+can exhaust the fixture gate's time budget during module load alone.
+
+Build it reproducibly with:
+
+```bash
+python3 packages/scorer/scripts/build_fast_otx_candidate.py
+```
+
+### Text-intent candidates
+
+The following are separate modules with distinct exported `TELEGRAPH_INTENT`
+values, but they currently share the same bounded lexical scoring algorithm:
+
+| Intent | Artifact | Size | Keccak256 |
+|---|---|---:|---|
+| `RESEARCH_SYNTHESIS` | `dist/degenlens_research_synthesis_v1.wasm` | 867,401 | `99c919b3bb5a1a4071686e7fda8892dd23a4b8d13ac3b5af41d03d897a991ea9` |
+| `TEXT_GENERATION` | `dist/degenlens_text_generation_v1.wasm` | 867,401 | `bf9ddf6716399f2d1ae0fb929d694fa0139e560112978bd14ba35ce835b95f5d` |
+| `WEB_SEARCH` | `dist/degenlens_web_search_v1.wasm` | 867,401 | `5939e596cb78c7a017ef249808c81e4fda61ed011f453677b885423bfdb22dc2` |
+
+Build all three with:
+
+```bash
+python3 packages/scorer/scripts/build_text_intent_candidates.py
+```
+
+Critical limitation: no public champion binaries or hidden Stage 2 fixtures
+for these three intents are present in this repository or exposed by the
+remote branch. These artifacts are therefore valid, fast intent-specific
+candidates, not evidence that they beat the live champions. Submit one at a
+time and treat the node's returned evaluation as the authority.
+
 ### Latency-safe fraud candidate
 
 `dist/degenlens_fraud_detection_v11.wasm` is the fallback for environments

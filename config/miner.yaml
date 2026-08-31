@@ -5,39 +5,47 @@ slug: degenlens-onchain
 protocol: generic
 name: DegenLens On-Chain Intelligence
 description: >
-  DegenLens answers questions about live blockchain state by reading node RPC
-  directly, and returns the evidence behind each answer rather than only a
-  verdict.
+  DegenLens reads live blockchain state straight from node RPC and returns the
+  evidence behind each answer, not just a verdict. It adds what a generic RPC
+  reader cannot: a curated registry of gambling-operator wallet clusters, used
+  to identify who an address is actually settling with.
 
 
-  ONCHAIN_TX_LOOKUP — from a transaction hash: whether it succeeded or
-  reverted, who sent it and to whom, whether it was a transfer, a contract call
-  and which function, or a deployment, the value moved, the block, the gas and
-  fee, and the ERC-20 transfers in its receipt. An unknown hash is reported as
-  not found, never guessed.
+  ONCHAIN_TX_LOOKUP — from a transaction hash: succeeded or reverted, sender
+  and recipient, whether it was a transfer, a contract call and which function,
+  or a deployment, the value moved, block, gas and fee, and the ERC-20
+  transfers in its receipt. An unknown hash is reported as not found, never
+  guessed.
 
 
-  WALLET_BALANCE_CHECK — from an address or ENS name: current native-coin and
-  token balances, read at a stated block. ENS is resolved through the registry;
-  an unresolvable name is reported as such, never answered against another
-  account. An unreadable balance is reported as unknown, never as zero — an
-  empty wallet and an unavailable provider are different facts.
+  WALLET_BALANCE_CHECK — from an address or ENS name: native-coin and token
+  balances at a stated block, plus the reviewed operator clusters that address
+  has recently touched. An unresolvable ENS name is reported as such, never
+  answered against another account. An unreadable balance is unknown, never
+  zero — an empty wallet and a dead provider are different facts.
 
 
-  FRAUD_DETECTION — from an address or transaction: five named screens (round-
-  trip returns, transfer velocity, counterparty concentration, dust fan-in,
+  FRAUD_DETECTION — from an address or transaction: five screens (round-trip
+  returns, transfer velocity, counterparty concentration, dust fan-in,
   repeated identical amounts), returning a bounded risk tier with every
-  measurement, so a low-risk answer carries the same evidence a high-risk one
-  does. Known exchanges, bridges, routers and reviewed operator clusters are
-  identified, so ordinary settlement is not flagged as suspicious. Tiers rank
-  review priority and are never a finding of fraud: the chain records
+  measurement, so a low-risk answer carries the evidence a high-risk one would.
+  Exchanges, bridges, routers and gambling operators are identified as
+  counterparties, so ordinary settlement is not flagged as suspicious. Tiers
+  rank review priority and are never a finding of fraud: the chain records
   settlement, not intent.
 
 
-  Every answer states its confidence, data source, and coverage; a partial read
-  or unavailable provider is said plainly, not passed off as a clean result.
-  Chains: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana,
-  tron, bitcoin, where the operation is available.
+  Attribution covers 65 reviewed wallets across Stake.com, Rollbit, BC.Game,
+  Shuffle.com and Yeet on eight chains, each labelled hot, cold or
+  consolidation and carrying its evidence status, so a caller can weigh the
+  claim rather than trust it. It is an ownership claim about an address, not
+  about any person, and an operator transfer is settlement, not proof of a
+  wager.
+
+
+  Every answer states its confidence, source and coverage; a partial read is
+  said plainly. Chains: ethereum, base, polygon, arbitrum, optimism, bsc,
+  avalanche, solana, tron, bitcoin, where the operation is available.
 
 base_url: https://degenlensv1.up.railway.app
 

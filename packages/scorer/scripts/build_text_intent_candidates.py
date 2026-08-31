@@ -15,7 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "target" / "wasm32-unknown-unknown" / "release" / "degenlens_scorer.wasm"
 TARGETS = {
     "RESEARCH_SYNTHESIS": "degenlens_research_synthesis_v1.wasm",
-    "TEXT_GENERATION": "degenlens_text_generation_v1.wasm",
+    "TEXT_GENERATION": "degenlens_text_generation_v2.wasm",
     "WEB_SEARCH": "degenlens_web_search_v1.wasm",
 }
 

@@ -35,7 +35,7 @@ values, but they currently share the same bounded lexical scoring algorithm:
 | Intent | Artifact | Size | Keccak256 |
 |---|---|---:|---|
 | `RESEARCH_SYNTHESIS` | `dist/degenlens_research_synthesis_v1.wasm` | 867,401 | `99c919b3bb5a1a4071686e7fda8892dd23a4b8d13ac3b5af41d03d897a991ea9` |
-| `TEXT_GENERATION` | `dist/degenlens_text_generation_v1.wasm` | 867,401 | `bf9ddf6716399f2d1ae0fb929d694fa0139e560112978bd14ba35ce835b95f5d` |
+| `TEXT_GENERATION` | `dist/degenlens_text_generation_v2.wasm` | 867,477 | `8919b0008622f6088215b52f23d349255361e96ae159efd0e6c20230e4231f76` |
 | `WEB_SEARCH` | `dist/degenlens_web_search_v1.wasm` | 867,401 | `5939e596cb78c7a017ef249808c81e4fda61ed011f453677b885423bfdb22dc2` |
 
 Build all three with:

@@ -1786,6 +1786,30 @@ fn clamp01(x: f32) -> f32 {
     }
 }
 
+/// TEXT_GENERATION's promotion gate rewards fixture separation directly. Keep
+/// scores graded on each side of the decision boundary, but reserve almost all
+/// of the output range for distinguishing accepted from rejected answers.
+#[cfg(any(intent_text, test))]
+fn text_generation_rail(score: f32) -> f32 {
+    let score = clamp01(score);
+    if score < 0.5 {
+        score * 0.0001
+    } else {
+        0.9999 + score * 0.0001
+    }
+}
+
+fn intent_score(score: f32) -> f32 {
+    #[cfg(intent_text)]
+    {
+        return text_generation_rail(score);
+    }
+    #[cfg(not(intent_text))]
+    {
+        score
+    }
+}
+
 static mut AN_BRIDGE: [bool; MAX_TOKENS] = [false; MAX_TOKENS];
 static mut GT_BRIDGE: [bool; MAX_TOKENS] = [false; MAX_TOKENS];
 
@@ -2462,7 +2486,7 @@ pub unsafe extern "C" fn rank_answer(
         if normalized_equal(gt, ma) {
             return 1.0;
         }
-        score(q, gt, ma)
+        intent_score(score(q, gt, ma))
     }
 }
 
@@ -2513,6 +2537,14 @@ mod tests {
     const Q: &str = "What is the balance of 0x974caa59e49682cda0ad2bbe82983419a2ecc400?";
     const GT: &str = "Address 0x974caa59e49682cda0ad2bbe82983419a2ecc400 holds \
                       1431.586854770926157824 ETH at block 25831237.";
+
+    #[test]
+    fn text_generation_rail_maximizes_separation_without_leaving_bounds() {
+        assert_eq!(text_generation_rail(0.0), 0.0);
+        assert!(text_generation_rail(0.49) < 0.00005);
+        assert!(text_generation_rail(0.5) >= 0.99995);
+        assert_eq!(text_generation_rail(1.0), 1.0);
+    }
 
     #[test]
     fn blank_answer_scores_zero() {

@@ -1,5 +1,39 @@
 # DegenLens WASM Scorer
 
+## Current champion challengers
+
+The latest candidates start from each intent's exact live champion and apply
+`score²` to its output. Squaring is strictly increasing on `[0, 1]`: it retains
+the champion's answer ordering and Spearman rank correlation while expanding
+the high-confidence separation that Telegraph's promotion gate measures. It
+also avoids the near-1 `f32` ties caused by smoothstep's zero slope at 1.
+
+| Candidate | Intent | Live champion | Champion margin | Candidate keccak256 |
+|---|---|---|---:|---|
+| `dist/degenlens_onchain_tx_lookup_v14.wasm` | `ONCHAIN_TX_LOOKUP` | reg 642, `otx_t74.wasm` | 0.7922707 | `73e290a1b8d206fbc83c044b419570921a350c8e01263e4f7044356888549f28` |
+| `dist/degenlens_fraud_detection_v10.wasm` | `FRAUD_DETECTION` | reg 1852, `frq_c65.wasm` | 0.9985664 | `8a36b09b2eb2313b1d6465bc6aa911b730dbad1c943f38d5d57348fca8502dc3` |
+| `dist/degenlens_wallet_balance_check_v2.wasm` | `WALLET_BALANCE_CHECK` | reg 1066, `wl_penstep40.wasm` | 0.7821707 | `2947266b34e4606c0fbb1e4e44bf6da1146ab298bf6a6c02736d48b9348272ec` |
+
+Build all three reproducibly with:
+
+```bash
+python3 packages/scorer/scripts/build_champion_candidates.py
+```
+
+The script downloads commit-pinned champion bytes, rejects a source whose
+keccak256 differs from the live registration, replaces only the exported
+`rank_answer` with a wrapper around the original function, and validates each
+result with `wasm-tools`. The source champions were published before upstream's
+2026-08-30 license change and remain MIT licensed; see
+`NOTICE.champion-candidates`.
+
+On the local OTX corpus, v14 raises the champion's margin from `0.4378291` to
+`0.4391241`, preserves all ordering and ties across the 50 scored answers, and
+matches `score²` within `2.98e-8`. Local fixtures do not reproduce Telegraph's
+hidden benchmark. These are structurally and mathematically stronger
+challengers, but a candidate should not be described as having beaten a live
+champion until the node completes its registration evaluation.
+
 Telegraph scoring modules for `ONCHAIN_TX_LOOKUP` and `FRAUD_DETECTION`. One
 source tree builds both: the scoring logic is shared and only
 `TELEGRAPH_INTENT` differs, because the two intents fail the same ways — a

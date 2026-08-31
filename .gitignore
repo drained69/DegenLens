@@ -76,6 +76,7 @@ dist/
 packages/scorer/dist/*
 !packages/scorer/dist/degenlens_onchain_tx_lookup_v14.wasm
 !packages/scorer/dist/degenlens_fraud_detection_v10.wasm
+!packages/scorer/dist/degenlens_fraud_detection_v11.wasm
 !packages/scorer/dist/degenlens_wallet_balance_check_v2.wasm
 .next/
 *.tsbuildinfo

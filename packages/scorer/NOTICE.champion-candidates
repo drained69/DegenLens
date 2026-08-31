@@ -8,6 +8,9 @@ change:
 - dist/degenlens_fraud_detection_v10.wasm
 - dist/degenlens_wallet_balance_check_v2.wasm
 
+`dist/degenlens_fraud_detection_v11.wasm` is derived from DegenLens fraud v1,
+which in turn derives from zkasuran's MIT-licensed salience scorer.
+
 Upstream: https://github.com/zkasuran/telegraph-salience-scorer
 MIT boundary: commit 9250395a8131e4f7da51ab548d455c7270d4acd3
 

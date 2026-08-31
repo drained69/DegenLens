@@ -14,6 +14,28 @@ also avoids the near-1 `f32` ties caused by smoothstep's zero slope at 1.
 | `dist/degenlens_fraud_detection_v10.wasm` | `FRAUD_DETECTION` | reg 1852, `frq_c65.wasm` | 0.9985664 | `8a36b09b2eb2313b1d6465bc6aa911b730dbad1c943f38d5d57348fca8502dc3` |
 | `dist/degenlens_wallet_balance_check_v2.wasm` | `WALLET_BALANCE_CHECK` | reg 1066, `wl_penstep40.wasm` | 0.7821707 | `2947266b34e4606c0fbb1e4e44bf6da1146ab298bf6a6c02736d48b9348272ec` |
 
+### Latency-safe fraud candidate
+
+`dist/degenlens_fraud_detection_v11.wasm` is the fallback for environments
+where the 24 MB transformer-based v10 exceeds Telegraph's fixture deadline. It
+starts from fraud v1, which previously passed the node's fixture and historical
+rank gates, then applies a piecewise affine confidence rail around `0.5`.
+
+| Artifact | Bytes | Local calls/sec | keccak256 |
+|---|---:|---:|---|
+| `dist/degenlens_fraud_detection_v11.wasm` | 1,047,879 | ~4,600 | `ac0c692f764e90cb59dac036ae247dc949071ad4d78fe7c40ea00f559f7a7b57` |
+
+Build it reproducibly with:
+
+```bash
+python3 packages/scorer/scripts/build_fast_fraud_candidate.py
+```
+
+The rail maps scores below `0.5` into `[0, 0.0005)` and scores at or above
+`0.5` into `[0.9995, 1]`. It is increasing within both ranges and keeps exact
+answers at `1`. This deliberately prioritizes completing the fixture gate and
+high separation over the transformer candidate's finer score gradation.
+
 Build all three reproducibly with:
 
 ```bash

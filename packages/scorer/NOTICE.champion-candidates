@@ -11,6 +11,11 @@ change:
 `dist/degenlens_fraud_detection_v11.wasm` is derived from DegenLens fraud v1,
 which in turn derives from zkasuran's MIT-licensed salience scorer.
 
+`dist/degenlens_fraud_detection_v12.wasm` is derived from the MIT-era fraud
+champion `frq_c65.wasm`. Its original function bodies and model data are kept
+byte-for-byte intact; the exported rank function adds bounded-input guards and
+an output contrast transform.
+
 Upstream: https://github.com/zkasuran/telegraph-salience-scorer
 MIT boundary: commit 9250395a8131e4f7da51ab548d455c7270d4acd3
 

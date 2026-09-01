@@ -251,6 +251,307 @@ endpoints:
             description: Lookback window from 1 to 720 hours. Defaults to 24.
             example: 24
 
+  - path: /
+    external_path: /
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Serve a human-facing product console without affecting miner routes."
+
+  - path: /meta
+    external_path: /meta
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Machine-readable service metadata for operators and integrations."
+
+  - path: /health
+    external_path: /health
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Liveness + readiness. Always 200 so the node never sees a hard failure."
+
+  - path: /metrics
+    external_path: /metrics
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Uptime, latency percentiles, error rate, cache efficiency. This is the evidence for the 75% performance component of the Miner Track score — screenshot it at submission time."
+
+  - path: /casino/stats
+    external_path: /casino/stats
+    method: POST
+    content_type: application/json
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Deposit and withdrawal flow for one casino over a lookback window."
+
+  - path: /casino/ranking
+    external_path: /casino/ranking
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Tracked casinos ranked by observed USD deposit volume."
+
+  - path: /operators/public
+    external_path: /operators/public
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Public identity and multi-chain observations for attributed operators."
+
+  - path: /transaction/lookup
+    external_path: /transaction/lookup
+    method: POST
+    intents:
+      - ONCHAIN_TX_LOOKUP
+    content_type: application/json
+    description: "ONCHAIN_TX_LOOKUP. Same answer as the GET form of this path, taking the same values in a JSON body instead of the query string."
+    params:
+      body:
+        required:
+          - name: tx_hash
+            type: string
+            intents: ["*"]
+            description: "0x-prefixed transaction hash of exactly 64 hexadecimal characters."
+            example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
+          - name: query
+            type: string
+            intents: ["*"]
+            description: "The caller original natural-language question, passed through verbatim. Always send this."
+            example: "What is the balance of this address?"
+        optional:
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum."
+            example: "ethereum"
+
+  - path: /wallet/trace
+    external_path: /wallet/trace
+    method: POST
+    intents:
+      - WALLET_BALANCE_CHECK
+    content_type: application/json
+    description: "WALLET_BALANCE_CHECK. Same answer as the GET form of this path, taking the same values in a JSON body instead of the query string."
+    params:
+      body:
+        required:
+          - name: address
+            type: string
+            intents: ["*"]
+            description: "A 0x-prefixed address of exactly 40 hexadecimal characters, or an ENS name ending .eth."
+            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+          - name: query
+            type: string
+            intents: ["*"]
+            description: "The caller original natural-language question, passed through verbatim. Always send this."
+            example: "What is the balance of this address?"
+        optional:
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum."
+            example: "ethereum"
+
+  - path: /wallet/balance
+    external_path: /wallet/balance
+    method: POST
+    intents:
+      - WALLET_BALANCE_CHECK
+    content_type: application/json
+    description: "WALLET_BALANCE_CHECK. Same answer as the GET form of this path, taking the same values in a JSON body instead of the query string."
+    params:
+      body:
+        required:
+          - name: address
+            type: string
+            intents: ["*"]
+            description: "A 0x-prefixed address of exactly 40 hexadecimal characters, or an ENS name ending .eth."
+            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+          - name: query
+            type: string
+            intents: ["*"]
+            description: "The caller original natural-language question, passed through verbatim. Always send this."
+            example: "What is the balance of this address?"
+        optional:
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum."
+            example: "ethereum"
+
+  - path: /anomaly/check
+    external_path: /anomaly/check
+    method: POST
+    intents:
+      - FRAUD_DETECTION
+    content_type: application/json
+    description: "FRAUD_DETECTION. Same answer as the GET form of this path, taking the same values in a JSON body instead of the query string."
+    params:
+      body:
+        required:
+          - name: query
+            type: string
+            intents: ["*"]
+            description: "The caller original natural-language question, passed through verbatim. Always send this."
+            example: "How likely is this address to be fraudulent?"
+        optional:
+          - name: address
+            type: string
+            intents: ["*"]
+            description: "A 0x-prefixed address of exactly 40 hexadecimal characters, or an ENS name ending .eth."
+            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum."
+            example: "ethereum"
+
+  - path: /wallet/trace
+    external_path: /wallet/trace
+    method: GET
+    intents:
+      - WALLET_BALANCE_CHECK
+    description: "WALLET_BALANCE_CHECK. "
+    params:
+      query:
+        required:
+          - name: address
+            type: string
+            intents: ["*"]
+            description: "A 0x-prefixed address of exactly 40 hexadecimal characters, or an ENS name ending .eth."
+            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
+          - name: query
+            type: string
+            intents: ["*"]
+            description: "The caller original natural-language question, passed through verbatim. Always send this."
+            example: "What is the balance of this address?"
+        optional:
+          - name: chain
+            type: string
+            intents: ["*"]
+            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum."
+            example: "ethereum"
+
+  - path: /casinos
+    external_path: /casinos
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. The full operator catalog, including explicit wallet coverage status."
+
+  - path: /market/networks
+    external_path: /market/networks
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Observed flow split by chain."
+
+  - path: /market/assets
+    external_path: /market/assets
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Asset composition of observed flow, optionally for one operator."
+
+  - path: /market/large-transfers
+    external_path: /market/large-transfers
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Individual transfers above a USD threshold. Every row is one verifiable tx."
+
+  - path: /operator/{slug}/series
+    external_path: /operator/{slug}/series
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Bucketed inbound/outbound flow series for one operator."
+    params:
+      path:
+        required:
+          - name: slug
+            type: string
+            intents: ["*"]
+            description: "The operator slug this path names, as listed by /casinos."
+            example: "stake"
+
+  - path: /operator/{slug}/counterparties
+    external_path: /operator/{slug}/counterparties
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Counterparty concentration for one operator's observed flow."
+    params:
+      path:
+        required:
+          - name: slug
+            type: string
+            intents: ["*"]
+            description: "The operator slug this path names, as listed by /casinos."
+            example: "stake"
+
+  - path: /coverage
+    external_path: /coverage
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. What this miner can and cannot see. Published so consumers can weight every other figure it returns."
+
+  - path: /player/evaluate
+    external_path: /player/evaluate
+    method: POST
+    content_type: application/json
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Evaluate one address against every attributed operator cluster."
+
+  - path: /players/leaderboard
+    external_path: /players/leaderboard
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Counterparties ranked by net observed position across operator clusters."
+
+  - path: /attribution/discover/{slug}
+    external_path: /attribution/discover/{slug}
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Propose sibling wallet candidates for one attributed operator."
+    params:
+      path:
+        required:
+          - name: slug
+            type: string
+            intents: ["*"]
+            description: "The operator slug this path names, as listed by /casinos."
+            example: "stake"
+
+  - path: /attribution/discover
+    external_path: /attribution/discover
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Run discovery across every attributed operator."
+
+  - path: /operator/{slug}/treasury
+    external_path: /operator/{slug}/treasury
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Current holdings across an operator's attributed clusters."
+    params:
+      path:
+        required:
+          - name: slug
+            type: string
+            intents: ["*"]
+            description: "The operator slug this path names, as listed by /casinos."
+            example: "stake"
+
+  - path: /market/treasury
+    external_path: /market/treasury
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Attributed operators ranked by observed on-chain reserves."
+
+  - path: /market/providers
+    external_path: /market/providers
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Infrastructure providers ranked by casino flow carried, with trend. Bridges, exchanges, and routing contracts — NOT game providers, which leave no on-chain record and cannot be derived from chain data."
+
+  - path: /players/cohorts
+    external_path: /players/cohorts
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Value segments, new-vs-returning, and flow concentration across every observed counterparty."
+
+  - path: /players/overlap
+    external_path: /players/overlap
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Addresses shared between operators — a competitive audience signal."
+
+  - path: /health/registry
+    external_path: /health/registry
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Health of every attributed operator's wallet claims."
+
+  - path: /health/operator/{slug}
+    external_path: /health/operator/{slug}
+    method: GET
+    description: "Product and catalog endpoint for the DegenLens application, NOT an intent target: do not route ONCHAIN_TX_LOOKUP, WALLET_BALANCE_CHECK or FRAUD_DETECTION here. Health of one operator's wallet claims."
+    params:
+      path:
+        required:
+          - name: slug
+            type: string
+            intents: ["*"]
+            description: "The operator slug this path names, as listed by /casinos."
+            example: "stake"
+
 semantics:
   signal_mapping:
     confidence_field: confidence

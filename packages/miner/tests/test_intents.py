@@ -885,7 +885,11 @@ def test_declared_endpoint_params_name_real_accepted_fields():
         if not params:
             continue
         allowed = accepted.get(endpoint["path"])
-        assert allowed, f"{endpoint['path']} declares params but is not an intent endpoint"
+        if not endpoint.get("intents"):
+            # Product routes may declare path/query params of their own; this
+            # test polices the INTENT contract, which is what the engine builds.
+            continue
+        assert allowed, f"{endpoint['path']} serves an intent but has no accepted-field list"
         # Every location the schema permits, not just `query` -- the POST
         # endpoints carry their contract under `body`, and those are the
         # endpoints an intent actually routes to.
@@ -991,7 +995,10 @@ def test_declared_chain_values_are_all_actually_served():
                         f"this miner does not serve"
                     )
                     seen += 1
-    assert seen == 3, f"expected a chain param on 3 intent endpoints, found {seen}"
+    expected = sum(1 for e in MANIFEST["endpoints"] if e.get("intents"))
+    assert seen == expected, (
+        f"expected a chain param on {expected} intent endpoints, found {seen}"
+    )
 
 
 def test_empty_optional_chain_uses_documented_default(offline):
@@ -1097,7 +1104,10 @@ def test_manifest_request_contract_is_accepted_by_the_route(offline, include_opt
             f"malformed: {payload}"
         )
         checked += 1
-    assert checked == 3, f"expected 3 intent endpoints, exercised {checked}"
+    expected = sum(1 for e in MANIFEST["endpoints"] if e.get("intents"))
+    assert checked == expected, (
+        f"expected {expected} intent endpoints, exercised {checked}"
+    )
 
 
 def test_every_declared_chain_is_accepted_on_every_intent_endpoint(offline):
@@ -1431,3 +1441,57 @@ def test_a_named_token_question_is_answered_with_that_token(stub_balance, monkey
         "address": STAKE_HOT, "chain": "ethereum",
         "query": f"What is the ETH balance of {STAKE_HOT}?"}).json()
     assert "USDC" not in r3["reasoning"] and "USDT" not in r3["reasoning"]
+
+
+def test_every_served_route_is_declared_and_every_declared_route_is_served():
+    """An undeclared route is a guaranteed failure, not a low score.
+
+    Signal 0xf57e14cb... , epoch 300: a caller asked this miner for
+    `/casino/ranking?hours=24` and the node refused it in 3ms without ever
+    reaching the app --
+
+        endpoint "/casino/ranking?hours=24" is not declared by miner
+        "degenlens-onchain"; declared endpoints: /anomaly/check,
+        /transaction/lookup, /wallet/balance
+
+    -- because the manifest had been trimmed to three endpoints while the app
+    still served thirty. That included the POST form of all three INTENT
+    endpoints and both forms of /wallet/trace, so any engine call that chose
+    POST could not land at all.
+
+    The two sets must stay identical: a served route missing from the manifest
+    cannot be called, and a declared route the app does not serve answers 404.
+    """
+    from app.main import app as fastapi_app
+
+    skip = {"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"}
+    served = set()
+    for route in fastapi_app.routes:
+        path = getattr(route, "path", "")
+        if not path or path in skip:
+            continue
+        for method in (getattr(route, "methods", set()) or set()):
+            if method in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+                served.add((path, method))
+
+    declared = {(e["path"], e["method"]) for e in MANIFEST["endpoints"]}
+    assert not (served - declared), (
+        f"served but NOT declared, so unreachable: {sorted(served - declared)}"
+    )
+    assert not (declared - served), (
+        f"declared but NOT served, so a guaranteed 404: {sorted(declared - served)}"
+    )
+
+
+def test_both_http_forms_of_every_intent_endpoint_are_declared():
+    """The engine picks the method; we do not. When only the GET form was
+    declared, a POST-shaped call was refused before reaching the app."""
+    by_path = {}
+    for e in MANIFEST["endpoints"]:
+        for intent in e.get("intents") or []:
+            by_path.setdefault(e["path"], set()).add(e["method"])
+    assert by_path, "no endpoint declares an intent"
+    for path, methods in by_path.items():
+        assert {"GET", "POST"} <= methods, (
+            f"{path} serves an intent but only declares {sorted(methods)}"
+        )

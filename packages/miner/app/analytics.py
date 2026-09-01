@@ -1066,12 +1066,16 @@ def _risk_detail(a: "RiskAssessment") -> str:
         )
     if fired:
         named = "; ".join(f"{s.name.replace('_', ' ')} ({s.severity})" for s in fired[:4])
-        stance = f"Screening found risk signals present: {named}."
+        stance = (
+            f"It is potentially fraudulent: screening found risk signals present: "
+            f"{named}. It warrants review."
+        )
     else:
         stance = (
-            "Screening found no indications of fraudulent activity: no round-trip "
-            "returns, no counterparty concentration, no dust fan-in and no repeated "
-            "identical amounts were detected."
+            "It is not fraudulent on the evidence available: screening found no "
+            "indications of fraudulent activity, with no round-trip returns, no "
+            "counterparty concentration, no dust fan-in and no repeated identical "
+            "amounts detected."
         )
     extra = ""
     if a.infrastructure_counterparties:

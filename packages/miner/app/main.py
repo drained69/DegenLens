@@ -1278,6 +1278,18 @@ def _token_keywords() -> frozenset[str]:
 _TOKEN_WORDS = _token_keywords()
 
 
+def _named_tokens(q: str) -> list[str]:
+    """The specific token symbols a question names, in the order it names them."""
+    found = []
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9-]{1,9}", q):
+        w = word.lower()
+        if w in _TOKEN_WORDS and w not in {
+            "token", "tokens", "erc-20", "erc20", "stablecoin", "holdings"
+        } and w not in found:
+            found.append(w)
+    return found
+
+
 def _asks_about_tokens(q: str) -> bool:
     """True when the question names a token this miner can report."""
     return any(re.search(rf"\b{re.escape(w)}\b", q) for w in _TOKEN_WORDS)
@@ -1330,6 +1342,30 @@ def _balance_reasoning(
     # the live champions follow this shape and avoid diluting the scored answer.
     if q and not asks_tokens and not asks_attribution:
         return parts[0]
+
+    # A question that NAMES a token is asking for that token's balance, and the
+    # answer is that figure -- not the native balance with every other holding
+    # appended. Measured against this intent's champion, "how much USDC does
+    # 0x... hold" answered as "holds 689595.92 ETH. Also holds 17000000000
+    # USDT, 10000000 LINK, ..." scores 0.000: the one figure asked for is
+    # buried among four the question never mentioned, each of which the ground
+    # truth does not carry. Answer what was asked.
+    named = _named_tokens(q) if q else []
+    if named:
+        by_symbol = {
+            (r["symbol"] or "").lower(): r for r in token_rows if r.get("symbol")
+        }
+        said = []
+        for sym in named:
+            row = by_symbol.get(sym)
+            if row is None:
+                said.append(
+                    f"{addr} holds no {sym.upper()} on {snapshot.chain}."
+                )
+            else:
+                value = row["balance"] if row["balance"] is not None else row["raw_balance"]
+                said.append(f"{addr} holds {value} {row['symbol']}.")
+        return " ".join(said)
 
     # Token holdings are answer content for "what does this wallet hold", so
     # they stay. Their ABSENCE is not: "no token balances were returned" adds a

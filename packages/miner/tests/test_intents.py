@@ -1373,3 +1373,45 @@ def test_token_balances_request_explicit_contracts_not_the_erc20_sweep():
         "the erc20 sweep is back; it silently returns zero reportable tokens "
         "for any address with 100+ spam contracts"
     )
+
+
+def test_a_named_token_question_is_answered_with_that_token(stub_balance, monkeypatch):
+    """"How much USDC does 0x... hold" is asking for the USDC figure.
+
+    It was answered with the NATIVE balance plus every other holding appended
+    -- "holds 689595.92 ETH. Also holds 17000000000 USDT, 10000000 LINK, ..."
+    -- which buries the one figure asked for among four the question never
+    mentioned. That measures 0.000 against this intent's champion, and it is
+    the wrong answer to the question regardless of any scorer.
+    """
+    async def fake_tokens(address, chain):
+        from app.onchain import TokenBalance
+        return [
+            TokenBalance(contract="0xa0b8", symbol="USDC", decimals=6,
+                         raw=142244500, amount=142.2445),
+            TokenBalance(contract="0xdac1", symbol="USDT", decimals=6,
+                         raw=17_000_000_000_000000, amount=17_000_000_000.0),
+        ], "live"
+    # stub_balance patches token_balances itself, so ours must land after it.
+    stub_balance(10**18)
+    monkeypatch.setattr(onchain, "token_balances", fake_tokens)
+
+    r = client.get("/wallet/balance", params={
+        "address": STAKE_HOT, "chain": "ethereum",
+        "query": f"How much USDC does {STAKE_HOT} hold?"}).json()
+    reasoning = r["reasoning"]
+    assert "USDC" in reasoning and "142.2445" in reasoning
+    assert "USDT" not in reasoning, "answered with a token the question never named"
+    assert "17000000000" not in reasoning
+
+    # A token the address does not hold is a real answer, not silence.
+    r2 = client.get("/wallet/balance", params={
+        "address": STAKE_HOT, "chain": "ethereum",
+        "query": f"How much WBTC does {STAKE_HOT} hold?"}).json()
+    assert "no WBTC" in r2["reasoning"]
+
+    # A plain native question is untouched by any of this.
+    r3 = client.get("/wallet/balance", params={
+        "address": STAKE_HOT, "chain": "ethereum",
+        "query": f"What is the ETH balance of {STAKE_HOT}?"}).json()
+    assert "USDC" not in r3["reasoning"] and "USDT" not in r3["reasoning"]

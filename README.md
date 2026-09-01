@@ -142,20 +142,31 @@ curl -X POST http://localhost:8787/casino/stats \
 ## Sentinel — the autonomous agent layer (Track 3)
 
 The application is more than a UI over one miner. **Sentinel** is an autonomous
-watch agent that runs inside the web server and composes the Telegraph network:
+watch agent that runs inside the web server and composes the Telegraph network.
+Every scan follows the same loop:
 
-1. **Watch.** On a schedule (default every 30 minutes) it discovers attributed
-   operators and pulls each one's flow stats — every call is a paid,
-   engine-routed request to DegenMiner (`ONCHAIN_TX_LOOKUP`).
-2. **Detect.** Pure rules look for bankrun-shaped conditions in observed flow:
-   outflow dominance (withdrawals ≥ 1.5× deposits), net-flow flips, depositor
-   exodus, verdict degradation, and low-confidence live observations. Findings
-   carry measurements and evidence, never solvency claims.
-3. **Escalate.** High-severity alerts trigger a multi-miner workflow through the
-   engine's auto-router: news search, community search, ETH price context,
-   chained sentiment analysis of the search results, and a fact check of the
-   insolvency claim — each answered by *different* miners on the network.
-4. **Report.** Alerts land on `/sentinel` with their full escalation trail and
+1. **Discover (local).** The operator registry and per-operator flow stats are
+   read from the co-located DegenMiner — these catalog endpoints are not
+   declared on the network, so they are free internal calls.
+2. **Watch (paid).** Sentinel rotates through the attributed operators' hot
+   wallets and checks each balance through the engine via the miner's declared
+   `/wallet/balance` endpoint — every check is a paid
+   `WALLET_BALANCE_CHECK` request that DegenMiner earns.
+3. **Detect.** Pure rules look for bankrun-shaped conditions: outflow
+   dominance (withdrawals ≥ 1.5× deposits), net-flow flips, depositor exodus,
+   verdict degradation, and — from the paid balance watches — treasury drains
+   (a material hot wallet losing ≥25% between scans). Findings carry
+   measurements and evidence, never solvency claims.
+4. **Enrich (paid).** For alerting operators the agent screens the moved
+   wallet through the declared `/anomaly/check` endpoint (`FRAUD_DETECTION`),
+   then pays for `ONCHAIN_TX_LOOKUP` on the transaction hashes the screen
+   cites as evidence.
+5. **Escalate (paid).** High-severity alerts trigger a multi-miner workflow
+   through the engine's auto-router: news search, community search, ETH price
+   context, chained sentiment analysis of the search results, and a fact
+   check of the insolvency claim — each answered by *different* miners on the
+   network.
+6. **Report.** Alerts land on `/sentinel` with their full evidence trail and
    are delivered to Telegram when configured. Every paid call — ours and other
    miners' — is receipted with intent, miner, cost, and `signal_hash`.
 
@@ -166,8 +177,9 @@ watch agent that runs inside the web server and composes the Telegraph network:
 | `POST /api/sentinel/run` | Trigger a scan immediately (manual or external cron) |
 
 The receipt log doubles as Track 3 evidence: it shows the application driving
-real request volume to DegenMiner's intents and composing other miners for
-escalation. Configure via `SENTINEL_*` variables (see `.env.example`).
+real request volume to DegenMiner's three declared intents and composing other
+miners for escalation. Configure via `SENTINEL_*` variables (see
+`.env.example`).
 
 ---
 

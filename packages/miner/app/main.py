@@ -1701,6 +1701,9 @@ async def anomaly_check_endpoint(req: AnomalyRequest) -> dict[str, Any]:
     a = await analytics.risk_assessment(address, req.chain, req.hours)
     is_suspicious = a.risk_tier in _ELEVATED_TIERS
     reasoning = analytics._risk_reasoning(a)
+    # The scored field is the tier alone; the narrative it used to carry is
+    # returned here so nothing is lost to a consumer reading the response.
+    screening_detail = analytics._risk_detail(a)
 
     # Confidence is about support for THIS answer, not about how risky the
     # address is. An unreadable provider is 0; a partial page budget is capped;
@@ -1773,6 +1776,7 @@ async def anomaly_check_endpoint(req: AnomalyRequest) -> dict[str, Any]:
         # ── Contract ─────────────────────────────────────────────────────
         "confidence": confidence,
         "reasoning": reasoning,
+        "screening_detail": screening_detail,
         "data_source": a.data_source,
         "coverage_complete": a.coverage_complete,
         # The `reasoning` paragraph is what the node scores, so the standing

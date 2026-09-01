@@ -2,6 +2,7 @@ import { TelegraphClient } from "@degenlens/shared";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
 import { ExactEvmScheme } from "@x402/evm";
 import { privateKeyToAccount } from "viem/accounts";
+import { resilientFetch } from "@/lib/fetch-fallback";
 
 const nodeUrl =
   process.env.TELEGRAPH_NODE_URL ?? "https://devnode.telegraphprotocol.com";
@@ -20,7 +21,7 @@ if (
 
 const paidFetch = process.env.EVM_PRIVATE_KEY
   ? wrapFetchWithPayment(
-      fetch,
+      resilientFetch,
       new x402Client().register(
         "eip155:*",
         new ExactEvmScheme(
@@ -28,7 +29,7 @@ const paidFetch = process.env.EVM_PRIVATE_KEY
         ),
       ),
     )
-  : fetch;
+  : resilientFetch;
 
 /**
  * Server-side Telegraph client. In dev, we call the local DegenMiner directly to skip

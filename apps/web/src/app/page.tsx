@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { CasinoRanking, CasinoRegistry, CasinoStats } from "@degenlens/shared";
 import { formatCount, formatUsd } from "@degenlens/shared";
 import { telegraph, telegraphMinerId } from "@/lib/telegraph";
+import { startSentinel } from "@/lib/sentinel/engine";
 import { EvidenceClass } from "@/components/confidence";
 import { DataSourceBadge } from "@/components/data-source";
 
@@ -29,6 +30,8 @@ async function stats(slug: string, hours: number) {
 }
 
 export default async function IntelligencePage() {
+  // Any site visit arms the Sentinel agent's scheduled loop (idempotent).
+  startSentinel();
   // Keep the landing page cheap and reliable. Ranking is an explicit operator
   // workflow; triggering two full registry scans during every homepage render
   // starves the miner when several visitors arrive together.

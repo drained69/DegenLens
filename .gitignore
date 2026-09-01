@@ -53,6 +53,7 @@ secrets.*
 
 # Logs, reports, dumps, and local scratch data
 *.log
+.sentinel-state.json
 *.mp4
 *.mov
 *.mkv

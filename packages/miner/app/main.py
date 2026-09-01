@@ -50,6 +50,7 @@ from .onchain import (
     NATIVE_SYMBOL,
     BalanceSnapshot,
     balance_snapshot,
+    known_tokens_for,
     resolve_ens,
     circuit_status,
     request_deadline,
@@ -1249,6 +1250,39 @@ async def _resolve_subject(raw: str, chain: str) -> tuple[str, str | None, str |
     return subject, None, None
 
 
+# Every ticker this miner can actually report, derived from the token registry
+# rather than hand-listed. A hand-listed subset is how this broke: the check
+# covered usdc/usdt/dai while the registry also carried WETH, WBTC, LINK, BUSD,
+# FRAX, WBNB and WAVAX, so "how much WBTC does 0x... hold" read as a native
+# question, skipped the token fetch, and answered in ETH against a WBTC ground
+# truth. On a near-exact-match scorer that is not a partial answer, it is a
+# total loss -- WALLET_BALANCE_CHECK scored 1.4e-14 while five miners scored
+# 0.99997. Deriving the list means adding a token to the registry can never
+# again leave the question-detector behind.
+def _token_keywords() -> frozenset[str]:
+    words = {"token", "tokens", "erc-20", "erc20", "stablecoin", "holdings"}
+    # A chain's NATIVE symbol must never count as a token word, even when
+    # another chain lists it as an ERC-20: BSC carries ETH in its token
+    # registry, so "what is the ETH balance of 0x..." -- the single most
+    # common question this intent gets -- would otherwise be read as a token
+    # question and answered with a token sentence appended, diluting the one
+    # figure that answers it.
+    native = {sym.lower() for sym in NATIVE_SYMBOL.values()}
+    for chain in DECLARED_CHAINS:
+        for symbol, _decimals in known_tokens_for(chain).values():
+            if symbol.lower() not in native:
+                words.add(symbol.lower())
+    return frozenset(words)
+
+
+_TOKEN_WORDS = _token_keywords()
+
+
+def _asks_about_tokens(q: str) -> bool:
+    """True when the question names a token this miner can report."""
+    return any(re.search(rf"\b{re.escape(w)}\b", q) for w in _TOKEN_WORDS)
+
+
 def _balance_reasoning(
     snapshot, token_rows: list[dict], labeled, wallet_claim,
     associations: list[dict], association_status: str,
@@ -1289,7 +1323,7 @@ def _balance_reasoning(
         f"Address {addr} on {snapshot.chain} holds {amount} {snapshot.native_symbol}."
     ]
     q = (query or "").lower()
-    asks_tokens = any(word in q for word in ("token", "erc-20", "erc20", "usdc", "usdt", "dai"))
+    asks_tokens = _asks_about_tokens(q)
     asks_attribution = any(word in q for word in ("casino", "operator", "gambling", "associated", "interacted"))
     # A native-balance question is fully answered by the first sentence. Keep
     # token and attribution enrichment in structured fields unless requested;

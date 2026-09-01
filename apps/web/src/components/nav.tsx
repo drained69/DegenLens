@@ -24,6 +24,12 @@ const groups = [
       { href: "/ask", label: "Query intelligence", code: "08" },
     ],
   },
+  {
+    label: "Automate",
+    links: [
+      { href: "/sentinel", label: "Sentinel agent", code: "09" },
+    ],
+  },
 ];
 
 function isActive(pathname: string, href: string) {

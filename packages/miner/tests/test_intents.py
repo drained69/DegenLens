@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 import app.analytics as analytics
 import app.onchain as onchain
 from app.main import DECLARED_CHAINS, _units, app
+from app.onchain import NATIVE_SYMBOL
 from app.onchain import Transfer, TransferSet
 
 client = TestClient(app)
@@ -1301,3 +1302,45 @@ def test_transaction_answer_does_not_narrow_with_the_question(monkeypatch):
     assert len(answers) == 1, (
         f"the answer still varies with the question ({len(answers)} variants)"
     )
+
+
+def test_token_question_detection_covers_every_reportable_token():
+    """A token this miner can report must be recognised when it is asked about.
+
+    WALLET_BALANCE_CHECK scored 1.4e-14 at epoch 298 while five miners scored
+    0.99997. The detector was a hand-written subset -- usdc, usdt, dai --
+    while the registry also carried WETH, WBTC, LINK, BUSD, FRAX, WBNB and
+    WAVAX. "How much WBTC does 0x... hold" therefore read as a NATIVE
+    question, skipped the token fetch entirely, and answered in ETH against a
+    WBTC ground truth. On a near-exact-match scorer that is not a partial
+    answer, it is a total loss. Deriving the words from the registry means a
+    token added there can never again leave the detector behind.
+    """
+    from app.main import _asks_about_tokens, _TOKEN_WORDS
+    from app.onchain import known_tokens_for
+
+    reportable = {
+        sym.lower()
+        for chain in DECLARED_CHAINS
+        for sym, _ in known_tokens_for(chain).values()
+    }
+    native = {s.lower() for s in NATIVE_SYMBOL.values()}
+    for symbol in reportable - native:
+        assert symbol in _TOKEN_WORDS, f"{symbol} is reportable but not recognised"
+        assert _asks_about_tokens(f"how much {symbol} does 0xabc hold?"), symbol
+
+
+def test_native_symbols_are_never_read_as_token_questions():
+    """BSC lists ETH as an ERC-20, so a naive registry sweep makes "what is
+    the ETH balance of 0x..." -- the commonest question this intent gets --
+    read as a token question and answer with a token sentence appended,
+    diluting the one figure that answers it."""
+    from app.main import _asks_about_tokens
+
+    for q in (
+        "what is the eth balance of 0xabc",
+        "how much eth does 0xabc hold",
+        "how much bnb does it hold",
+        "what is the balance of 0xabc",
+    ):
+        assert not _asks_about_tokens(q), f"{q!r} was read as a token question"

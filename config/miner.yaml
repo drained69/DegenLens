@@ -229,28 +229,6 @@ endpoints:
             intents: ["*"]
             description: "Required complete fraud question naming the entity, address, transaction, or action to assess."
             example: "How likely is 0x974caa59e49682cda0ad2bbe82983419a2ecc400 to be fraudulent on ethereum?"
-        optional:
-          - name: address
-            type: string
-            intents: ["*"]
-            description: Explicit address or ENS name. Takes precedence over an address extracted from query.
-            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
-          - name: tx_hash
-            type: string
-            intents: ["*"]
-            description: "Explicit transaction subject: 0x followed by exactly 64 hexadecimal characters. The sender is screened."
-            example: "0x70a2cdd2de8fccbc87f04aae988c5a7aa72b2fa776cce7dccb692e7169bf2431"
-          - name: chain
-            type: string
-            intents: ["*"]
-            description: "One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Omit or send an empty value to use ethereum."
-            example: ethereum
-          - name: hours
-            type: integer
-            intents: ["*"]
-            description: Lookback window from 1 to 720 hours. Defaults to 24.
-            example: 24
-
   - path: /
     external_path: /
     method: GET
@@ -383,18 +361,6 @@ endpoints:
             intents: ["*"]
             description: "The caller original natural-language question, passed through verbatim. Always send this."
             example: "How likely is this address to be fraudulent?"
-        optional:
-          - name: address
-            type: string
-            intents: ["*"]
-            description: "A 0x-prefixed address of exactly 40 hexadecimal characters, or an ENS name ending .eth."
-            example: "0x974caa59e49682cda0ad2bbe82983419a2ecc400"
-          - name: chain
-            type: string
-            intents: ["*"]
-            description: "Chain to read. One of: ethereum, base, polygon, arbitrum, optimism, bsc, avalanche, solana, tron, bitcoin. Defaults to ethereum."
-            example: "ethereum"
-
   - path: /wallet/trace
     external_path: /wallet/trace
     method: GET

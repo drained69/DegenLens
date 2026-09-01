@@ -995,7 +995,15 @@ def test_declared_chain_values_are_all_actually_served():
                         f"this miner does not serve"
                     )
                     seen += 1
-    expected = sum(1 for e in MANIFEST["endpoints"] if e.get("intents"))
+    # /anomaly/check deliberately declares ONLY `query`: it mirrors the
+    # FRAUD_DETECTION leader, and every extra optional param is one more field
+    # the engine's LLM request-builder has to fill (it sent
+    # "address=&chain=&tx_hash=" when it could not) and one more chance for
+    # that build step to fail outright, which scored us a hard 0 at epoch 300.
+    expected = sum(
+        1 for e in MANIFEST["endpoints"]
+        if e.get("intents") and e["path"] != "/anomaly/check"
+    )
     assert seen == expected, (
         f"expected a chain param on {expected} intent endpoints, found {seen}"
     )
@@ -1119,7 +1127,11 @@ def test_every_declared_chain_is_accepted_on_every_intent_endpoint(offline):
         location = "body" if endpoint["method"] == "POST" else "query"
         groups = endpoint["params"][location]
         base = {e["name"]: e["example"] for e in groups.get("required", [])}
-        chain_param = next(e for e in groups["optional"] if e["name"] == "chain")
+        chain_param = next(
+            (e for e in groups.get("optional", []) if e["name"] == "chain"), None
+        )
+        if chain_param is None:
+            continue  # query-only endpoint; nothing to sweep
         # Only the chains THIS endpoint offers: transaction lookup is EVM-only,
         # so sweeping all ten would test a claim the contract never makes.
         for chain in sorted(_offered_chains(chain_param)):

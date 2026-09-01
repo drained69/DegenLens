@@ -1344,3 +1344,32 @@ def test_native_symbols_are_never_read_as_token_questions():
         "what is the balance of 0xabc",
     ):
         assert not _asks_about_tokens(q), f"{q!r} was read as a token question"
+
+
+def test_token_balances_request_explicit_contracts_not_the_erc20_sweep():
+    """`alchemy_getTokenBalances(address, "erc20")` returns only the FIRST 100
+    contracts an address holds, ordered by contract address ascending.
+
+    Every token this miner can report sorts late -- USDC is 0xa0b8..., USDT
+    0xdac1..., WETH 0xc02a... -- so on any address with a long tail of
+    airdropped spam the sweep returns 100 junk contracts, all filtered out as
+    unknown, and the miner reports ZERO tokens for a wallet holding billions.
+    Binance 8 returned 54 non-zero balances, none of them real, while actually
+    holding 17bn USDT, 10m LINK and 15.5 WETH.
+
+    Asking for the exact contract list is one call, strictly cheaper, and
+    cannot be truncated. This test reads the source because the failure is
+    invisible at the response level: an empty token list is indistinguishable
+    from an address that genuinely holds nothing.
+    """
+    import inspect
+    from app import onchain
+
+    src = inspect.getsource(onchain.token_balances)
+    assert '"alchemy_getTokenBalances", [address, wanted]' in src, (
+        "token_balances no longer passes an explicit contract list"
+    )
+    assert '[address, "erc20"]' not in src, (
+        "the erc20 sweep is back; it silently returns zero reportable tokens "
+        "for any address with 100+ spam contracts"
+    )

@@ -445,7 +445,10 @@ export async function runScan(trigger: ScanTrigger): Promise<ScanRecord> {
   const cfg = sentinelConfig();
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
-  const totalsStart = { ...sentinelStore.totals() };
+  // Force the on-disk state to load before baselines are captured, or the
+  // per-scan deltas would measure against an empty in-memory state.
+  const stateBefore = await sentinelStore.state();
+  const totalsStart = { ...stateBefore.totals };
   const errors: string[] = [];
   let operatorsScanned = 0;
   let walletsWatched = 0;

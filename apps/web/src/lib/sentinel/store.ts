@@ -135,7 +135,9 @@ export const sentinelStore = {
     const s = runtime().state;
     s.receipts.unshift(receipt);
     if (s.receipts.length > MAX_RECEIPTS) s.receipts.length = MAX_RECEIPTS;
-    if (receipt.ok) {
+    // Only engine traffic counts as paid calls — local co-located miner calls
+    // are free and would otherwise inflate the network-usage evidence.
+    if (receipt.ok && receipt.mode !== 'local') {
       s.totals.paid_calls += 1;
       s.totals.spend_usd += receipt.cost_usd ?? 0;
     }

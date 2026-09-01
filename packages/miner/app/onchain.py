@@ -1579,11 +1579,26 @@ async def token_balances(address: str, chain: str) -> tuple[list[TokenBalance], 
         return [], "unavailable"
 
     url = f"https://{_alchemy_host(chain)}/v2/{settings.alchemy_key}"
+    # Ask for the exact contracts we can report, never the "erc20" sweep.
+    #
+    # The sweep returns only the FIRST 100 contracts an address holds, ordered
+    # by contract address ascending. Every token in this registry sorts late --
+    # USDC is 0xa0b8..., USDT 0xdac1..., WETH 0xc02a... -- so on any address
+    # with a long tail of airdropped spam (which is most of them) the sweep
+    # returns 100 junk contracts, all of them filtered out below as unknown,
+    # and the miner reports ZERO tokens for a wallet holding billions. That is
+    # what Binance 8 did: 54 non-zero balances returned, none of them real,
+    # while the address actually holds 17bn USDT, 10m LINK and 15.5 WETH.
+    #
+    # An explicit contract list is also one call, so this is strictly cheaper.
+    wanted = list(known_tokens_for(chain).keys())
+    if not wanted:
+        return [], "unsupported_chain"
     try:
         async with upstream_slot():
             async with httpx.AsyncClient(timeout=settings.upstream_timeout_s) as client:
                 result = await _rpc(
-                    client, url, "alchemy_getTokenBalances", [address, "erc20"]
+                    client, url, "alchemy_getTokenBalances", [address, wanted]
                 )
     except Exception:  # noqa: BLE001
         _record_upstream_result(ok=False, chain=chain)

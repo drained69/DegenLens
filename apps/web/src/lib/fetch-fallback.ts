@@ -16,9 +16,8 @@ const execFileAsync = promisify(execFile);
 
 const execOptions = { timeout: 30_000, maxBuffer: 10 * 1024 * 1024 };
 
-function flattenHeaders(init?: RequestInit): Record<string, string> {
+function flattenHeaders(h: HeadersInit | undefined): Record<string, string> {
   const out: Record<string, string> = {};
-  const h = init?.headers as HeadersInit | undefined;
   if (!h) return out;
   if (h instanceof Headers) {
     h.forEach((v, k) => {
@@ -56,11 +55,10 @@ function parseCurlOutput(stdout: string): Response {
   return new Response(body, { status, headers });
 }
 
-async function curlFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const url = String(input);
+async function curlFetch(url: string, init?: RequestInit): Promise<Response> {
   const method = (init?.method ?? 'GET').toUpperCase();
   const args = ['-sS', '-D', '-', '-X', method, '--max-time', '25', url];
-  for (const [k, v] of Object.entries(flattenHeaders(init))) {
+  for (const [k, v] of Object.entries(flattenHeaders(init?.headers))) {
     if (k.toLowerCase() === 'content-length') continue;
     args.push('-H', `${k}: ${v}`);
   }
@@ -77,6 +75,18 @@ async function curlFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
   }
 }
 
+async function undiciThenCurl(
+  url: string,
+  init?: RequestInit,
+): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    // fetch only throws for network-level failures — never for HTTP status.
+    return curlFetch(url, init);
+  }
+}
+
 export async function resilientFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -84,10 +94,20 @@ export async function resilientFetch(
   if (process.env.TELEGRAPH_NO_CURL_FALLBACK === '1') {
     return fetch(input, init);
   }
-  try {
-    return await fetch(input, init);
-  } catch (err) {
-    // fetch only throws for network-level failures — never for HTTP status.
-    return curlFetch(input, init);
+  if (input instanceof Request) {
+    // The x402 payment wrapper always invokes the underlying fetch with a
+    // Request object (cloned to attach payment headers). Normalize it to plain
+    // url/init so a network failure can still reach the curl fallback.
+    const method = input.method.toUpperCase();
+    const headers: Record<string, string> = {};
+    input.headers.forEach((v, k) => {
+      headers[k] = v;
+    });
+    let body: string | undefined;
+    if (method !== 'GET' && method !== 'HEAD' && !input.bodyUsed) {
+      body = await input.clone().text().catch(() => undefined);
+    }
+    return undiciThenCurl(input.url, { method, headers, body });
   }
+  return undiciThenCurl(String(input), init);
 }

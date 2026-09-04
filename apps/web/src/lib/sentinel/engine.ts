@@ -129,6 +129,24 @@ function extractAnswer(result: unknown): string | undefined {
       const content = msg?.content ?? (choices[0] as Record<string, unknown>)?.text;
       if (typeof content === 'string' && content.trim()) return content.slice(0, 600);
     }
+    // Search-shaped miners (Tavily etc.): answer may be null with a results list.
+    const results = r.results;
+    if (Array.isArray(results) && results.length > 0) {
+      const parts = results
+        .slice(0, 4)
+        .map((item) => {
+          if (item && typeof item === 'object') {
+            const rr = item as Record<string, unknown>;
+            const title = typeof rr.title === 'string' ? rr.title : '';
+            const content =
+              typeof rr.content === 'string' ? rr.content.slice(0, 200) : '';
+            return [title, content].filter(Boolean).join(' — ');
+          }
+          return undefined;
+        })
+        .filter((x): x is string => Boolean(x));
+      if (parts.length) return parts.join(' | ').slice(0, 600);
+    }
     // Common structured miner shapes.
     for (const key of ['answer', 'ai_response', 'text', 'summary', 'content', 'result']) {
       const v = r[key];
@@ -156,6 +174,17 @@ interface BalanceResult {
   data_source?: string;
 }
 
+function isTransientError(error: string): boolean {
+  return (
+    error.includes('timed out') ||
+    error.includes('500') ||
+    error.includes('502') ||
+    error.includes('503') ||
+    error.includes('routing failed') ||
+    error.includes('fetch failed')
+  );
+}
+
 async function engineCall<T>(
   purpose: Receipt['purpose'],
   endpoint: string,
@@ -163,43 +192,54 @@ async function engineCall<T>(
   method: 'GET' | 'POST',
   intent: string,
 ): Promise<{ ok: true; result: T } | { ok: false; error: string }> {
-  const ts = new Date().toISOString();
-  try {
-    const res = await withTimeout(
-      telegraph.askDirect<T>(telegraphMinerId, endpoint, payload, method),
-      CALL_TIMEOUT_MS,
-    );
-    const mode: Receipt['mode'] =
-      String(telegraphMinerId) === 'local' ? 'local' : 'engine-direct';
-    await sentinelStore.pushReceipt({
-      ts,
-      purpose,
-      mode,
-      endpoint,
-      intent,
-      miner_id: String(res.miner_id),
-      miner_name: res.miner_name,
-      cost_usd: res.cost_usd ?? 0,
-      duration_ms: res.duration_ms,
-      signal_hash: res.signal_hash,
-      ok: true,
-    });
-    return { ok: true, result: res.result };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    await sentinelStore.pushReceipt({
-      ts,
-      purpose,
-      mode: String(telegraphMinerId) === 'local' ? 'local' : 'engine-direct',
-      endpoint,
-      intent,
-      miner_id: String(telegraphMinerId),
-      cost_usd: 0,
-      ok: false,
-      error,
-    });
-    return { ok: false, error };
+  const mode: Receipt['mode'] =
+    String(telegraphMinerId) === 'local' ? 'local' : 'engine-direct';
+  // The engine intermittently stalls or 5xxs under load; one retry with
+  // backoff recovers most transient failures without masking real ones.
+  const maxAttempts = 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const ts = new Date().toISOString();
+    try {
+      const res = await withTimeout(
+        telegraph.askDirect<T>(telegraphMinerId, endpoint, payload, method),
+        CALL_TIMEOUT_MS,
+      );
+      await sentinelStore.pushReceipt({
+        ts,
+        purpose,
+        mode,
+        endpoint,
+        intent,
+        miner_id: String(res.miner_id),
+        miner_name: res.miner_name,
+        cost_usd: res.cost_usd ?? 0,
+        duration_ms: res.duration_ms,
+        signal_hash: res.signal_hash,
+        ok: true,
+      });
+      return { ok: true, result: res.result };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      if (attempt < maxAttempts && isTransientError(error)) {
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+        continue;
+      }
+      await sentinelStore.pushReceipt({
+        ts,
+        purpose,
+        mode,
+        endpoint,
+        intent,
+        miner_id: String(telegraphMinerId),
+        cost_usd: 0,
+        ok: false,
+        error,
+      });
+      return { ok: false, error };
+    }
   }
+  // Unreachable — the loop always returns.
+  return { ok: false, error: 'exhausted retries' };
 }
 
 /** Local, unpaid call to the co-located miner (undeclared convenience endpoints). */
@@ -237,21 +277,31 @@ async function routedAsk(
   query: string,
 ): Promise<EscalationStep> {
   const step: EscalationStep = { step: '', query, cost_usd: 0, ok: false };
-  try {
-    const res = await withTimeout(
-      telegraph.ask<unknown>(query),
-      CALL_TIMEOUT_MS,
-    );
-    step.ok = true;
-    step.answer = extractAnswer(res.result);
-    step.intent = res.intent;
-    step.miner_id = String(res.miner_id);
-    step.miner_name = res.miner_name;
-    step.cost_usd = res.cost_usd ?? 0;
-    step.duration_ms = res.duration_ms;
-    step.signal_hash = res.signal_hash;
-  } catch (err) {
-    step.error = err instanceof Error ? err.message : String(err);
+  // The auto-router intermittently 500s or times out under load; one retry
+  // with backoff recovers most transient failures without masking real ones.
+  const maxAttempts = 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const res = await withTimeout(
+        telegraph.ask<unknown>(query),
+        CALL_TIMEOUT_MS,
+      );
+      step.ok = true;
+      step.answer = extractAnswer(res.result);
+      step.intent = res.intent;
+      step.miner_id = String(res.miner_id);
+      step.miner_name = res.miner_name;
+      step.cost_usd = res.cost_usd ?? 0;
+      step.duration_ms = res.duration_ms;
+      step.signal_hash = res.signal_hash;
+      break;
+    } catch (err) {
+      step.error = err instanceof Error ? err.message : String(err);
+      if (attempt < maxAttempts && isTransientError(step.error)) {
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+        continue;
+      }
+    }
   }
   await sentinelStore.pushReceipt({
     ts: new Date().toISOString(),
@@ -297,35 +347,63 @@ function buildWatchList(casinos: Casino[]): WatchEntry[] {
 
 // ── Enrichment: fraud screens and tx lookups (paid) ─────────────────────────
 
-async function fraudScreen(row: WalletWatchRow): Promise<FraudScreen> {
+async function fraudScreen(
+  target: Pick<WalletWatchRow, 'address' | 'chain'>,
+): Promise<FraudScreen> {
   const query =
-    `How likely is ${row.address} on ${row.chain} to be showing fraudulent ` +
+    `How likely is ${target.address} on ${target.chain} to be showing fraudulent ` +
     `or anomalous transaction activity in the last 24 hours?`;
-  const res = await engineCall<AnomalyReport>(
+  const res = await engineCall<AnomalyReport & { signals?: string[] }>(
     'fraud',
     '/anomaly/check',
-    { query, address: row.address, chain: row.chain, hours: 24 },
-    'GET',
+    { query, address: target.address, chain: target.chain, hours: 24 },
+    'POST',
     'FRAUD_DETECTION',
   );
   if (!res.ok) {
-    return { address: row.address, chain: row.chain, ok: false, error: res.error };
+    return { address: target.address, chain: target.chain, ok: false, error: res.error };
   }
   return {
-    address: row.address,
-    chain: row.chain,
+    address: target.address,
+    chain: target.chain,
     ok: true,
     risk_tier: res.result.risk_tier ?? res.result.verdict,
     risk_score: res.result.risk_score ?? res.result.score,
     reasoning: res.result.reasoning,
+    signals: res.result.signals ?? [],
     signal_count: res.result.signal_count,
   };
 }
 
-function evidenceTxHashes(screen: FraudScreen, chain: string): string[] {
-  // The fraud screen's reasoning cites tx hashes; mine them for paid lookups.
-  const hashes = (screen.reasoning ?? '').match(/0x[a-fA-F0-9]{64}/g) ?? [];
+function evidenceTxHashes(screen: FraudScreen): string[] {
+  // Wash-trade round-trip signals cite tx hashes; mine them for paid lookups.
+  const text = [screen.reasoning ?? '', ...(screen.signals ?? [])].join(' ');
+  const hashes = text.match(/0x[a-fA-F0-9]{64}/g) ?? [];
   return [...new Set(hashes)].slice(0, 3);
+}
+
+/** Largest recent observed transfers for an operator, from the free local feed. */
+async function largestTransferHashes(
+  slug: string,
+  windowHours: number,
+): Promise<{ txHash: string; chain: string }[]> {
+  const res = await localCall<{
+    transfers?: { tx_hash: string; chain: string; operator_slug: string; usd_value: number }[];
+    pending_first_read?: boolean;
+    data_source?: string;
+  }>(
+    'txlookup',
+    `/market/large-transfers?hours=${windowHours}&min_usd=25000&limit=50`,
+    {},
+    'GET',
+    'ONCHAIN_TX_LOOKUP',
+  );
+  if (!res.ok) return [];
+  const rows = (res.result.transfers ?? [])
+    .filter((t) => t.operator_slug === slug)
+    .sort((a, b) => b.usd_value - a.usd_value)
+    .slice(0, 2);
+  return rows.map((t) => ({ txHash: t.tx_hash, chain: t.chain }));
 }
 
 async function txLookup(txHash: string, chain: string): Promise<TxEvidence> {
@@ -334,7 +412,7 @@ async function txLookup(txHash: string, chain: string): Promise<TxEvidence> {
     'txlookup',
     '/transaction/lookup',
     { query, tx_hash: txHash, chain },
-    'GET',
+    'POST',
     'ONCHAIN_TX_LOOKUP',
   );
   if (!res.ok) {
@@ -457,7 +535,11 @@ export async function runScan(trigger: ScanTrigger): Promise<ScanRecord> {
 
   try {
     // 1. Discovery — the operator registry and flow stats from the co-located
-    //    miner (free; these catalog endpoints are undeclared on the network).
+    //    miner. This is a DIRECT call, so it is free regardless of whether
+    //    the endpoint is declared -- and /casinos IS declared now, because
+    //    the engine refuses undeclared paths outright and real callers were
+    //    getting `endpoint "/casinos" is not declared` back.
+    sentinelStore.setPhase('discover', 'operator registry');
     const registry = await localCall<CasinoRegistry>(
       'discovery',
       '/casinos',
@@ -496,12 +578,14 @@ export async function runScan(trigger: ScanTrigger): Promise<ScanRecord> {
 
     const watchRows: WalletWatchRow[] = [];
     for (const entry of slice) {
+      sentinelStore.setPhase('watch', `${entry.operator.name} ${entry.address.slice(0, 8)}…`);
       const row = await watchWallet(entry);
       watchRows.push(row);
       if (row.ok) walletsWatched += 1;
     }
 
     // Flow snapshots per operator (free, local) for the flow-side rules.
+    sentinelStore.setPhase('detect', 'flow + balance rules');
     const statsBySlug = new Map<string, CasinoStats>();
     const prevBySlug = new Map<string, ReturnType<typeof sentinelStore.snapshotFor>>();
     for (const casino of operators) {
@@ -579,21 +663,41 @@ export async function runScan(trigger: ScanTrigger): Promise<ScanRecord> {
     }
 
     // 4. Paid enrichment — fraud screens, then tx lookups on cited evidence.
+    // Rotation means an alerting operator often has no watch rows this scan,
+    // so fall back to its first known hot/treasury wallet from the registry.
+    const walletBySlug = new Map<string, WatchEntry>();
+    for (const entry of watchList) {
+      if (!walletBySlug.has(entry.operator.slug)) {
+        walletBySlug.set(entry.operator.slug, entry);
+      }
+    }
     for (const alert of pending) {
       if (cfg.maxFraudScreens <= 0) break;
-      const target =
+      const watched =
         alert.wallet_watch.find((r) => r.drop_pct !== undefined) ??
         alert.wallet_watch.find((r) => r.ok);
-      if (!target) continue;
+      const fallback = walletBySlug.get(alert.operator_slug);
+      if (!watched && !fallback) continue;
+      sentinelStore.setPhase('enrich', alert.operator_name);
+      const target: Pick<WalletWatchRow, 'address' | 'chain'> = watched ?? {
+        address: fallback!.address,
+        chain: fallback!.chain,
+      };
       const screen = await fraudScreen(target);
       alert.fraud_screens.push(screen);
 
       if (screen.ok && cfg.maxTxLookups > 0) {
-        for (const txHash of evidenceTxHashes(screen, target.chain).slice(
-          0,
-          cfg.maxTxLookups,
-        )) {
-          alert.tx_lookups.push(await txLookup(txHash, target.chain));
+        let hashes: { txHash: string; chain: string }[] = evidenceTxHashes(screen).map(
+          (txHash) => ({ txHash, chain: target.chain }),
+        );
+        // Fall back to the operator's largest recent observed transfer when
+        // the screen cites nothing. The registry-wide feed is often cold —
+        // tolerate that and skip rather than guess a target.
+        if (hashes.length === 0) {
+          hashes = await largestTransferHashes(alert.operator_slug, cfg.windowHours);
+        }
+        for (const { txHash, chain } of hashes.slice(0, cfg.maxTxLookups)) {
+          alert.tx_lookups.push(await txLookup(txHash, chain));
         }
       }
       await sentinelStore.persist();
@@ -603,10 +707,19 @@ export async function runScan(trigger: ScanTrigger): Promise<ScanRecord> {
     if (cfg.escalate !== 'never' && cfg.maxEscalations > 0) {
       const toEscalate = pending
         .filter((a) => cfg.escalate === 'always' || a.severity === 'high')
+        // High-severity alerts claim the escalation budget first.
+        .sort((a, b) =>
+          a.severity === b.severity
+            ? Date.parse(b.ts) - Date.parse(a.ts)
+            : a.severity === 'high'
+              ? -1
+              : 1,
+        )
         .slice(0, cfg.maxEscalations);
 
       for (const alert of toEscalate) {
         try {
+          sentinelStore.setPhase('escalate', alert.operator_name);
           alert.escalation = await escalate(alert);
           escalations += 1;
         } catch (err) {
@@ -619,6 +732,7 @@ export async function runScan(trigger: ScanTrigger): Promise<ScanRecord> {
       }
     }
 
+    sentinelStore.setPhase('report');
     const scan = finishScan(
       trigger, startedAt, startedMs, totalsStart,
       operatorsScanned, walletsWatched, alertsFired, escalations, errors,
@@ -638,7 +752,7 @@ async function watchWallet(entry: WatchEntry): Promise<WalletWatchRow> {
     'watch',
     '/wallet/balance',
     { query, address: entry.address, chain: entry.chain },
-    'GET',
+    'POST',
     'WALLET_BALANCE_CHECK',
   );
 
@@ -753,9 +867,45 @@ export function nextScanAt(): string | null {
   return new Date(next).toISOString();
 }
 
+/** What the recent receipts say about whether paid calls are actually landing. */
+function paymentHealth(): {
+  state: 'ok' | 'rejected' | 'unfunded' | 'not_configured' | 'unknown';
+  paid_ok: number;
+  paid_failed: number;
+  last_error: string | null;
+} {
+  if (!telegraphPaymentConfigured) {
+    return { state: 'not_configured', paid_ok: 0, paid_failed: 0, last_error: null };
+  }
+  const paid = sentinelStore
+    .receipts()
+    .filter((r) => r.mode !== 'local');
+  const ok = paid.filter((r) => r.ok).length;
+  const failed = paid.filter((r) => !r.ok);
+  const lastError = failed.length ? (failed[0].error ?? null) : null;  // newest first
+  if (!paid.length) {
+    return { state: 'unknown', paid_ok: 0, paid_failed: 0, last_error: null };
+  }
+  if (ok > 0 && failed.length === 0) {
+    return { state: 'ok', paid_ok: ok, paid_failed: 0, last_error: null };
+  }
+  // A 402 with a funded-looking wallet is almost always an empty USDC balance,
+  // and saying so beats making the operator read the raw receipt log.
+  const unfunded = Boolean(
+    lastError && /payment required|balance or allowance/i.test(lastError),
+  );
+  return {
+    state: unfunded ? 'unfunded' : 'rejected',
+    paid_ok: ok,
+    paid_failed: failed.length,
+    last_error: lastError,
+  };
+}
+
 export function sentinelStatus() {
   const cfg = sentinelConfig();
   const rt = sentinelStore.runtime();
+  const phase = sentinelStore.phase();
   return {
     enabled: cfg.enabled,
     interval_minutes: cfg.intervalMinutes,
@@ -769,7 +919,15 @@ export function sentinelStatus() {
     escalate: cfg.escalate,
     scheduler_running: Boolean(rt.timer),
     scan_in_progress: sentinelStore.isRunning(),
+    scan_phase: phase.phase,
+    scan_phase_subject: phase.subject ?? null,
     payment_configured: telegraphPaymentConfigured,
+    // `payment_configured` only means a key is present. It says nothing about
+    // whether payments SUCCEED, and the difference is the whole agent: with an
+    // unfunded wallet every paid watch is rejected 402, `wallets_watched` and
+    // `paid_calls` sit at 0 on every scan, and the status still cheerfully
+    // reads "configured: true". Report what the receipts actually show.
+    payment_health: paymentHealth(),
     miner_id: String(telegraphMinerId),
     last_scan: sentinelStore.lastScan() ?? null,
     next_scan_at: nextScanAt(),

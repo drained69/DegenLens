@@ -31,10 +31,23 @@ function freshState(): SentinelState {
   };
 }
 
+export type ScanPhase =
+  | 'discover'
+  | 'watch'
+  | 'detect'
+  | 'enrich'
+  | 'escalate'
+  | 'report'
+  | 'idle';
+
 interface SentinelRuntime {
   state: SentinelState;
   loaded: boolean;
   running: boolean;
+  /** Live phase of the in-progress scan, for the UI pipeline. */
+  phase: ScanPhase;
+  /** Operator the current phase is working on, when applicable. */
+  phaseSubject?: string;
   lastScan?: ScanRecord;
   timer?: ReturnType<typeof setInterval>;
   bootTimer?: ReturnType<typeof setTimeout>;
@@ -50,6 +63,7 @@ function runtime(): SentinelRuntime {
       state: freshState(),
       loaded: false,
       running: false,
+      phase: 'idle',
     };
   }
   return g.__degenlens_sentinel;
@@ -98,6 +112,21 @@ export const sentinelStore = {
 
   setRunning(value: boolean): void {
     runtime().running = value;
+    if (!value) {
+      runtime().phase = 'idle';
+      runtime().phaseSubject = undefined;
+    }
+  },
+
+  setPhase(phase: ScanPhase, subject?: string): void {
+    const rt = runtime();
+    rt.phase = phase;
+    rt.phaseSubject = subject;
+  },
+
+  phase(): { phase: ScanPhase; subject?: string } {
+    const rt = runtime();
+    return { phase: rt.phase, subject: rt.phaseSubject };
   },
 
   setLastScan(scan: ScanRecord): void {
@@ -126,6 +155,7 @@ export const sentinelStore = {
     s.scans.unshift(scan);
     if (s.scans.length > MAX_SCANS) s.scans.length = MAX_SCANS;
     s.totals.scans += 1;
+    s.totals.escalations += scan.escalations;
     runtime().lastScan = scan;
     await persist();
   },
@@ -187,6 +217,11 @@ export const sentinelStore = {
 
   totals(): SentinelTotals {
     return runtime().state.totals;
+  },
+
+  /** In-memory receipts, newest first (pushReceipt unshifts). */
+  receipts(): SentinelState['receipts'] {
+    return runtime().state.receipts;
   },
 
   newId(): string {

@@ -277,6 +277,197 @@ CASES = (
         "South African liquidation proceedings reporting",
         "https://www.bloomberg.com/news/articles/2021-06-23/s-african-brothers-vanish-along-with-3-6-billion-in-bitcoin",
     ),
+    FraudCase(
+        "safemoon",
+        ("safemoon", "braden karony", "kyle nagy"),
+        "SafeMoon was a cryptocurrency whose executives told investors that its "
+        "liquidity pool was locked and inaccessible while in fact withdrawing from "
+        "it. In November 2023 the SEC charged the company and executives Braden "
+        "Karony, Thomas Smith and Kyle Nagy with fraud and unregistered securities "
+        "offering, alleging they diverted roughly $200 million. Chief executive "
+        "Karony was convicted of conspiracy, wire fraud and money laundering in May "
+        "2025; Nagy remains at large.",
+        "SEC: SafeMoon and executives charged with fraud",
+        "https://www.sec.gov/news/press-release/2023-229",
+    ),
+    FraudCase(
+        "bybit",
+        ("bybit hack", "bybit"),
+        "In February 2025 attackers stole roughly $1.46 billion in ether from a "
+        "Bybit cold wallet during a routine transfer, by manipulating what signers "
+        "saw so they approved a malicious contract change. It is the largest "
+        "cryptocurrency theft on record. The FBI attributed the theft to the "
+        "North Korea-linked Lazarus Group, and Bybit covered customer balances and "
+        "continued withdrawals.",
+        "FBI: North Korea responsible for Bybit theft",
+        "https://www.ic3.gov/PSA/2025/PSA250226",
+    ),
+    FraudCase(
+        "threearrows",
+        ("three arrows", "3ac", "su zhu", "kyle davies"),
+        "Three Arrows Capital, a crypto hedge fund founded by Su Zhu and Kyle "
+        "Davies, collapsed in mid-2022 after leveraged bets including a large "
+        "position in LUNA. A court ordered its liquidation in the British Virgin "
+        "Islands in June 2022, with creditor claims of roughly $3.5 billion. The "
+        "collapse cascaded through lenders including Voyager, Celsius, BlockFi and "
+        "Genesis. Zhu was later jailed for four months in Singapore for failing to "
+        "cooperate with liquidators.",
+        "BVI liquidation of Three Arrows Capital",
+        "https://www.teneo.com/three-arrows-capital-ltd/",
+    ),
+    FraudCase(
+        "nomad",
+        ("nomad bridge", "nomad hack"),
+        "In August 2022 a faulty upgrade to the Nomad token bridge left any message "
+        "provable, so a single working exploit could be copied by anyone. Roughly "
+        "$190 million was drained in a chaotic free-for-all involving hundreds of "
+        "addresses. Nomad offered a 10 percent bounty for returns and recovered a "
+        "portion of the funds.",
+        "Nomad bridge incident disclosure",
+        "https://medium.com/nomad-xyz-blog/nomad-bridge-hack-root-cause-analysis-875ad2e5aacd",
+    ),
+    FraudCase(
+        "harmony",
+        ("harmony bridge", "horizon bridge"),
+        "In June 2022 attackers compromised two of the five multisig keys securing "
+        "Harmony's Horizon bridge and stole roughly $100 million in assets. The "
+        "U.S. Treasury and analysts attributed the theft to the North Korea-linked "
+        "Lazarus Group.",
+        "Harmony Horizon bridge incident",
+        "https://www.elliptic.co/blog/harmony-horizon-bridge-hack",
+    ),
+    FraudCase(
+        "beanstalk",
+        ("beanstalk",),
+        "In April 2022 an attacker took a roughly $1 billion flash loan to acquire a "
+        "supermajority of Beanstalk's governance tokens, then passed and executed a "
+        "malicious proposal in the same transaction, draining about $182 million "
+        "from the protocol and netting roughly $76 million after repaying the loan.",
+        "Beanstalk governance exploit report",
+        "https://bean.money/blog/beanstalk-governance-exploit",
+    ),
+    FraudCase(
+        "euler",
+        ("euler finance", "euler hack"),
+        "In March 2023 an attacker exploited a missing health check in Euler "
+        "Finance's donation function to drain roughly $197 million in a series of "
+        "flash-loan transactions. After negotiation on-chain the attacker returned "
+        "substantially all of the funds within a month.",
+        "Euler Finance incident disclosure",
+        "https://www.euler.finance/blog/euler-exploit-post-mortem",
+    ),
+    FraudCase(
+        "wintermute",
+        ("wintermute",),
+        "In September 2022 roughly $160 million was stolen from market maker "
+        "Wintermute's decentralized finance operations after a vanity address "
+        "generated with the Profanity tool was brute-forced, the tool's keys being "
+        "derived from a 32-bit seed. Wintermute said it remained solvent.",
+        "Profanity vanity-address vulnerability",
+        "https://blog.1inch.io/a-vulnerability-disclosed-in-profanity-an-ethereum-vanity-address-tool/",
+    ),
+    FraudCase(
+        "binance_settlement",
+        ("changpeng zhao", "binance settlement", "cz binance"),
+        "In November 2023 Binance pleaded guilty to violating the Bank Secrecy Act "
+        "and failing to maintain an effective anti-money-laundering programme, and "
+        "agreed to pay roughly $4.3 billion in penalties. Founder Changpeng Zhao "
+        "pleaded guilty personally, stepped down as chief executive, and was "
+        "sentenced to four months in prison in April 2024. This was an "
+        "anti-money-laundering and sanctions failure, not a finding that customer "
+        "funds were stolen.",
+        "DOJ: Binance and CEO plead guilty",
+        "https://www.justice.gov/opa/pr/binance-and-ceo-plead-guilty-federal-charges-4b-resolution",
+    ),
+    FraudCase(
+        "voyager",
+        ("voyager digital", "voyager"),
+        "Voyager Digital, a crypto brokerage, filed for Chapter 11 bankruptcy in "
+        "July 2022 after roughly $650 million in loans to Three Arrows Capital went "
+        "bad. The FDIC and Federal Reserve separately ordered Voyager to stop "
+        "falsely telling customers their deposits were federally insured.",
+        "FDIC: cease and desist over deposit insurance claims",
+        "https://www.fdic.gov/news/press-releases/2022/pr22056.html",
+    ),
+    FraudCase(
+        "blockfi",
+        ("blockfi",),
+        "BlockFi, a crypto lender, filed for Chapter 11 bankruptcy in November 2022, "
+        "citing exposure to FTX and Alameda after Three Arrows Capital defaulted. "
+        "It had earlier agreed to pay $100 million to the SEC and state regulators "
+        "over its unregistered lending product.",
+        "SEC: BlockFi to pay $100 million",
+        "https://www.sec.gov/news/press-release/2022-26",
+    ),
+    FraudCase(
+        "tornadocash",
+        ("tornado cash", "roman storm", "roman semenov"),
+        "Tornado Cash is an Ethereum coin mixer that the U.S. Treasury sanctioned in "
+        "August 2022, saying it had laundered more than $7 billion since 2019, "
+        "including roughly $455 million stolen by the North Korea-linked Lazarus "
+        "Group. A court ruled in 2024 that immutable smart contracts could not be "
+        "designated as property, and the sanctions were lifted in March 2025. "
+        "Developer Roman Storm was prosecuted separately.",
+        "U.S. Treasury: Tornado Cash designation",
+        "https://home.treasury.gov/news/press-releases/jy0916",
+    ),
+    FraudCase(
+        "hex",
+        ("hex", "richard heart", "pulsechain"),
+        "The SEC charged Richard Heart and his Hex, PulseChain and PulseX projects "
+        "in July 2023, alleging he raised more than $1 billion in unregistered "
+        "securities offerings and misappropriated roughly $12 million on luxury "
+        "goods. A federal judge dismissed the case for lack of jurisdiction in "
+        "February 2025, and the SEC declined to amend. The allegations were never "
+        "tested at trial.",
+        "SEC v. Richard Schueler (Richard Heart)",
+        "https://www.sec.gov/litigation/litreleases/lr-25787",
+    ),
+    FraudCase(
+        "creamfinance",
+        ("cream finance",),
+        "Cream Finance, a decentralized lending protocol, lost roughly $130 million "
+        "in October 2021 when an attacker manipulated the price oracle for its "
+        "yUSD collateral using flash loans, inflating collateral value and "
+        "borrowing against it. It was the third major exploit of the protocol that "
+        "year.",
+        "Cream Finance exploit analysis",
+        "https://www.certik.com/resources/blog/cream-finance-incident-analysis",
+    ),
+    FraudCase(
+        "badgerdao",
+        ("badgerdao", "badger dao"),
+        "In December 2021 attackers compromised BadgerDAO's front end via a "
+        "Cloudflare API key and injected a script that asked users to approve "
+        "malicious token allowances, draining roughly $120 million. The protocol's "
+        "smart contracts were never breached; the theft came entirely through the "
+        "web interface.",
+        "BadgerDAO incident post-mortem",
+        "https://badger.com/technical-post-mortem",
+    ),
+    FraudCase(
+        "squidgame",
+        ("squid game token", "squid token"),
+        "The SQUID token, marketed off the Netflix series in late 2021, used a "
+        "contract that blocked holders from selling. After the price rose sharply "
+        "the creators withdrew the liquidity and disappeared with roughly $3.3 "
+        "million, and the token went to near zero within minutes. It is a textbook "
+        "rug pull.",
+        "CFTC and press reporting on the SQUID rug pull",
+        "https://www.bbc.co.uk/news/business-59129466",
+    ),
+    FraudCase(
+        "genesis",
+        ("genesis global", "genesis capital"),
+        "Genesis Global Capital, the lending arm of Digital Currency Group, halted "
+        "withdrawals in November 2022 after FTX's collapse and filed for Chapter 11 "
+        "in January 2023 owing roughly $3.5 billion to its largest creditors. It "
+        "agreed with the SEC and the New York Attorney General to pay penalties "
+        "over the Gemini Earn programme, which the SEC said was an unregistered "
+        "securities offering.",
+        "SEC: Genesis and Gemini charged over Gemini Earn",
+        "https://www.sec.gov/news/press-release/2023-7",
+    ),
 )
 
 

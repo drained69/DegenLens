@@ -468,6 +468,176 @@ CASES = (
         "SEC: Genesis and Gemini charged over Gemini Earn",
         "https://www.sec.gov/news/press-release/2023-7",
     ),
+    FraudCase(
+        "rugpull",
+        ("rug pull", "rugpull", "rug-pull"),
+        "A rug pull is an exit scam in which the people who created a token or "
+        "protocol take the money and abandon it. The common mechanics are removing "
+        "the liquidity pool so holders cannot sell, minting unlimited supply to dump "
+        "on buyers, or writing a contract that blocks selling for everyone except "
+        "the deployer. It is usually preceded by heavy promotion and a rapid price "
+        "rise, and completed in a single transaction once enough buyers are in. The "
+        "SQUID token and AnubisDAO are widely cited examples.",
+        "CFTC customer advisory on rug pulls",
+        "https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/rug_pulls.html",
+    ),
+    FraudCase(
+        "ponzi",
+        ("ponzi scheme", "ponzi"),
+        "A Ponzi scheme pays existing investors with money from new investors rather "
+        "than from any real profit, while claiming a trading strategy or business is "
+        "generating the returns. It requires continuous recruitment, collapses when "
+        "inflows stop, and is identified by consistently high returns regardless of "
+        "market conditions, difficulty withdrawing, and unregistered sellers. Named "
+        "after Charles Ponzi; the largest was Bernard Madoff's, and crypto examples "
+        "include BitConnect, OneCoin and PlusToken.",
+        "SEC: Ponzi schemes",
+        "https://www.investor.gov/protect-your-investments/fraud/types-fraud/ponzi-scheme",
+    ),
+    FraudCase(
+        "pigbutchering",
+        ("pig butchering", "pig-butchering", "sha zhu pan", "romance scam"),
+        "Pig butchering is a long-form investment scam in which the victim is "
+        "befriended over weeks, often through a wrong-number text or a dating app, "
+        "then steered onto a fake trading platform that shows fabricated profits. "
+        "Small withdrawals are allowed to build trust before a large deposit is "
+        "taken and the victim is charged fictitious taxes or fees to release funds. "
+        "The FBI reported billions in annual losses, and much of the operation runs "
+        "out of trafficked labour compounds in Southeast Asia.",
+        "FBI: investment fraud and pig butchering",
+        "https://www.ic3.gov/AnnualReport/Reports/2023_IC3Report.pdf",
+    ),
+    FraudCase(
+        "approvalphishing",
+        ("approval phishing", "wallet drainer", "drainer", "ice phishing"),
+        "Approval phishing steals funds without stealing a private key. The victim "
+        "is shown a convincing site and asked to sign a token approval or a "
+        "Permit/Permit2 signature that grants the attacker an unlimited allowance; "
+        "the attacker then transfers the tokens at will, sometimes long afterwards. "
+        "The signature request often looks routine, which is why the theft appears "
+        "to come from a wallet the owner still controls. Drainer kits are sold as a "
+        "service for a share of proceeds.",
+        "Chainalysis: approval phishing",
+        "https://www.chainalysis.com/blog/approval-phishing-crypto-scam/",
+    ),
+    FraudCase(
+        "addresspoisoning",
+        ("address poisoning", "address spoofing"),
+        "Address poisoning seeds a victim's transaction history with a lookalike "
+        "address. The attacker sends a zero-value or dust transfer from an address "
+        "whose first and last characters match one the victim recently used, so that "
+        "when the victim later copies an address from their history they copy the "
+        "attacker's. The technique costs almost nothing and relies entirely on "
+        "people verifying only the ends of an address.",
+        "Chainalysis: address poisoning",
+        "https://www.chainalysis.com/blog/address-poisoning-scam/",
+    ),
+    FraudCase(
+        "flashloanattack",
+        ("flash loan attack", "flash-loan attack", "flash loan exploit"),
+        "A flash loan attack borrows a very large sum with no collateral, uses it to "
+        "distort a protocol's own state within a single transaction, and repays the "
+        "loan from the profit before the transaction ends. The usual target is a "
+        "price oracle that reads a spot pool the attacker has just moved, letting "
+        "them borrow against inflated collateral or redeem shares at a wrong price. "
+        "Beanstalk, Cream Finance and Mango Markets are documented examples.",
+        "Beanstalk governance exploit report",
+        "https://bean.money/blog/beanstalk-governance-exploit",
+    ),
+    FraudCase(
+        "oraclemanipulation",
+        ("oracle manipulation", "price oracle attack"),
+        "Oracle manipulation moves the price a protocol trusts rather than breaking "
+        "the protocol's code. If collateral is valued from a spot decentralized "
+        "exchange pool, an attacker with enough capital, often flash-borrowed, can "
+        "push that pool's price for one block, borrow against the inflated value, "
+        "and leave the bad debt behind. Defences are time-weighted average prices, "
+        "multiple independent feeds, and deviation and staleness checks.",
+        "Chainlink: oracle manipulation",
+        "https://chain.link/education-hub/market-manipulation-vs-oracle-exploits",
+    ),
+    FraudCase(
+        "honeypottoken",
+        ("honeypot token", "honeypot contract", "cannot sell token"),
+        "A honeypot token is written so that buying succeeds and selling fails. The "
+        "block may be an explicit allowlist, a transfer tax set to one hundred "
+        "percent, a paused transfer function, or a hidden condition that only the "
+        "deployer can satisfy. The chart therefore only ever rises, because no one "
+        "can exit, until the deployer withdraws the liquidity.",
+        "CFTC customer advisory on rug pulls",
+        "https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/rug_pulls.html",
+    ),
+    FraudCase(
+        "washtrading",
+        ("wash trading", "wash trade"),
+        "Wash trading is buying and selling the same asset with oneself to "
+        "manufacture volume and price action that other traders will react to. On "
+        "chain it is cheap because an operator can control both sides through many "
+        "addresses, and it has been used to inflate NFT collection rankings and to "
+        "make an exchange or token look more liquid than it is. It is market "
+        "manipulation and is prohibited in regulated markets.",
+        "CFTC: wash trading",
+        "https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/index.htm",
+    ),
+    FraudCase(
+        "exitscam",
+        ("exit scam",),
+        "An exit scam is the deliberate shutdown of a business that has been taking "
+        "customer money, with the balances kept. In crypto it typically appears as "
+        "an exchange or investment platform that halts withdrawals citing a hack, "
+        "maintenance or a regulatory issue while operators move funds out and become "
+        "uncontactable. Thodex and Africrypt are documented examples, and a rug pull "
+        "is the token-level version of the same thing.",
+        "FBI: cryptocurrency investment fraud",
+        "https://www.ic3.gov/Media/Y2023/PSA230609",
+    ),
+    FraudCase(
+        "sybilattack",
+        ("sybil attack", "airdrop farming"),
+        "A Sybil attack is one actor presenting as many independent participants. In "
+        "token distributions it means splitting activity across hundreds or "
+        "thousands of wallets to capture a disproportionate share of an airdrop; in "
+        "governance it means acquiring enough apparent identities to swing a vote. "
+        "Detection relies on funding-source clustering, timing correlation and "
+        "behavioural similarity across the addresses.",
+        "Chainalysis: Sybil attacks and airdrop farming",
+        "https://www.chainalysis.com/blog/airdrop-farming-sybil-attacks/",
+    ),
+    FraudCase(
+        "dustingattack",
+        ("dusting attack", "dust attack"),
+        "A dusting attack sends tiny amounts of cryptocurrency to many addresses so "
+        "that when a recipient later combines that dust with their own funds, the "
+        "spending transaction links the addresses together and de-anonymises the "
+        "owner. It is a surveillance and profiling technique rather than a direct "
+        "theft, and is often a precursor to targeted phishing.",
+        "Binance Academy: dusting attacks",
+        "https://academy.binance.com/en/articles/what-is-a-dusting-attack",
+    ),
+    FraudCase(
+        "fiftyonepercent",
+        ("51% attack", "51 percent attack", "majority attack", "double spend"),
+        "A 51 percent attack is control of a majority of a proof-of-work chain's "
+        "hash rate, or a comparable stake share, which lets the attacker reorganise "
+        "recent blocks and spend the same coins twice: deposit and sell on an "
+        "exchange, then replace the chain segment containing the deposit. It cannot "
+        "steal coins from other people's addresses or change consensus rules. "
+        "Ethereum Classic and Bitcoin Gold have both suffered documented instances.",
+        "Ethereum Classic 51% attack reporting",
+        "https://www.coindesk.com/tech/2020/08/07/etc-blockchain-suffers-second-51-attack-in-a-week/",
+    ),
+    FraudCase(
+        "simswap",
+        ("sim swap", "sim-swap", "simjacking"),
+        "A SIM swap transfers a victim's phone number to an attacker's SIM, usually "
+        "by social-engineering or bribing a carrier employee, after which any "
+        "SMS-based two-factor code goes to the attacker. It is used to take over "
+        "exchange accounts and email, and is why SMS is the weakest second factor "
+        "for anything holding funds. Several multi-million-dollar crypto thefts have "
+        "been prosecuted on these facts.",
+        "FBI: SIM swapping",
+        "https://www.ic3.gov/Media/Y2022/PSA220208",
+    ),
 )
 
 
